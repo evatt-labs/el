@@ -25,9 +25,15 @@ jobs:
     # workflow filename as a trusted publisher for @evatt-labs/el on
     # npmjs.com (or `npm trust github`), and every push of a `v*` tag from
     # here on publishes with no stored token at all.
+    #
+    # Every `v*` tag here comes from release-please-action (see
+    # release-please.yml), which also already created the GitHub Release
+    # this job attaches the npm tarball to. contents: write below is only
+    # for that upload, scoped to the same trusted-tag-push boundary as
+    # everything else in this job.
     environment: npm
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,3 +59,15 @@ jobs:
       # trusted publishing already does automatically for a public package
       # from a public repo, but it's cheap to be explicit about intent.
       - run: npm publish --provenance
+
+      # Same tree npm just published from, packed the same way npm itself
+      # would — not a separate "build," since there's nothing to compile.
+      # Attaches to the GitHub Release release-please already created for
+      # this tag (see release-please.yml); --clobber makes a rerun of this
+      # job idempotent instead of failing on a duplicate asset.
+      - name: Attach npm tarball to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tarball=$(npm pack)
+          gh release upload "${{ github.ref_name }}" "$tarball" --clobber --repo "${{ github.repository }}"

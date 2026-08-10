@@ -1,0 +1,27 @@
+name: release-please
+
+# Push to main only. This is the same trust boundary the rest of this
+# repo's workflows follow: a ref an external contributor cannot push to,
+# so a fork's code never runs with the write permissions below in scope.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # release-please reads Conventional Commit messages (feat:, fix:,
+      # etc.) since the last release. On every push to main it opens or
+      # updates a "release PR" that bumps package.json and CHANGELOG.md.
+      # Merging that PR is what actually cuts a release: this same action
+      # then tags it and publishes the GitHub Release, which is what
+      # triggers publish.yml's npm publish.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          release-type: node
