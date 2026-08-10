@@ -1,15 +1,21 @@
 name: Publish
 
-# Tag push only — never `pull_request` or `pull_request_target`. This is
-# the single most load-bearing line in this file: a trigger an external
-# contributor could influence (a PR event, a workflow_dispatch accepting an
-# arbitrary ref) would mean a fork's code running with publish credentials
-# in scope. Publishing only happens when someone with push access to this
-# repo pushes a `v*` tag.
+# Tag push, plus a manual escape hatch — never `pull_request` or
+# `pull_request_target`. This is the single most load-bearing part of
+# this file: a trigger an external contributor could influence (a PR
+# event, or a workflow_dispatch that accepted an arbitrary ref as input)
+# would mean a fork's code running with publish credentials in scope.
+# workflow_dispatch below takes no inputs: it can only run against a ref
+# the person dispatching it explicitly picks, and dispatching it at all
+# already requires write access to this repo, same trust level as
+# pushing the tag. It exists to recover a release whose tag push didn't
+# trigger this workflow (e.g. tagged by a token GitHub doesn't chain
+# workflow runs from) without deleting and recreating the tag.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
