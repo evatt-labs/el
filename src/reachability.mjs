@@ -22,31 +22,55 @@ function sleep(ms) {
 // this specific pattern belongs to Cloudflare's edge, not to any Worker.
 const EDGE_ERROR_PAGE = /^error code: \d+/i;
 
+async function probe(url) {
+  try {
+    const response = await fetch(url);
+    const body = await response.text();
+    return !EDGE_ERROR_PAGE.test(body.trim());
+  } catch {
+    // Network-level failure — DNS not yet resolving, connection refused.
+    // Same "not ready yet" bucket as an edge-error page.
+    return false;
+  }
+}
+
 /**
- * Polls a URL until it stops returning Cloudflare's own edge-error page.
- * Best-effort: if the window elapses without becoming stable, this warns
- * rather than throwing — the environment is genuinely provisioned at this
- * point, and edge propagation will finish on its own even if it takes
- * longer than expected. Aborting the whole `up()` over that would be an
- * overreaction.
+ * Polls a URL until it stops returning Cloudflare's own edge-error page —
+ * for `consecutiveSuccesses` requests in a row, not just once.
+ *
+ * One success is not enough: verified live, a URL can answer correctly,
+ * then answer with the edge-error page on the very next request, then
+ * correctly again. Cloudflare's anycast network routes different requests
+ * to different points of presence, and they don't all learn about a new
+ * hostname at the same moment — one successful probe only proves the ONE
+ * PoP that particular request happened to land on is ready, not that all of
+ * them are. Requiring several in a row makes it far less likely every one
+ * of them landed on the same not-yet-propagated PoP by chance, without
+ * pretending this proves *global* consistency, which no client sitting
+ * behind anycast routing can actually observe from one vantage point.
+ *
+ * Best-effort: if the window elapses without reaching that streak, this
+ * warns rather than throwing — the environment is genuinely provisioned at
+ * this point, and propagation will finish on its own even if it takes
+ * longer than expected or than this function can confirm. A consumer that
+ * depends on this being airtight (a CI smoke test, not a human clicking a
+ * link) should still carry its own retry — this reduces the odds of
+ * hitting the window, it does not eliminate them.
  */
-export async function waitForReachable(url, { attempts = 20, delayMs = 3000 } = {}) {
+export async function waitForReachable(
+  url,
+  { attempts = 20, delayMs = 3000, consecutiveSuccesses = 3 } = {},
+) {
+  let streak = 0;
   for (let i = 0; i < attempts; i++) {
-    try {
-      const response = await fetch(url);
-      const body = await response.text();
-      if (!EDGE_ERROR_PAGE.test(body.trim())) {
-        return true;
-      }
-    } catch {
-      // Network-level failure — DNS not yet resolving, connection refused.
-      // Same "not ready yet" bucket as an edge-error page; just retry.
-    }
+    streak = (await probe(url)) ? streak + 1 : 0;
+    if (streak >= consecutiveSuccesses) return true;
     if (i < attempts - 1) await sleep(delayMs);
   }
   console.warn(
-    `  (${url} still returning an edge error after ${String((attempts * delayMs) / 1000)}s — ` +
-      `it should resolve on its own; this just means el didn't wait for it)`,
+    `  (${url} did not settle after ${String((attempts * delayMs) / 1000)}s — it should still ` +
+      `resolve on its own; a consumer that depends on this being ready immediately, like a CI ` +
+      `smoke test, should carry its own retry too)`,
   );
   return false;
 }
