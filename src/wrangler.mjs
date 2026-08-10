@@ -53,8 +53,9 @@ export function loadWranglerConfig(serviceDir) {
 }
 
 /**
- * Deploys a mutated copy of a service's config, written alongside the real
- * one and removed immediately after.
+ * Runs a wrangler subcommand against a mutated copy of a service's config,
+ * written alongside the real one and removed immediately after. Shared by
+ * deployWithConfig (below) and applyD1Migrations.
  *
  * Must live inside serviceDir, not a system temp directory — wrangler
  * resolves `main` and other relative paths against the CONFIG FILE's
@@ -75,7 +76,7 @@ export function loadWranglerConfig(serviceDir) {
  * what's usually a git working tree. Consumers should gitignore
  * `.el-deploy-*.json`.
  */
-export function deployWithConfig(serviceDir, config) {
+function runWithTempConfig(serviceDir, config, wranglerArgs) {
   const wrangler = findWranglerBin(serviceDir);
   const configPath = path.join(serviceDir, `.el-deploy-${String(process.pid)}.json`);
   writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
@@ -86,7 +87,7 @@ export function deployWithConfig(serviceDir, config) {
   process.once("uncaughtException", cleanup);
 
   try {
-    execFileSync(wrangler, ["deploy", "--config", configPath], {
+    execFileSync(wrangler, [...wranglerArgs, "--config", configPath], {
       cwd: serviceDir,
       stdio: "inherit",
     });
@@ -96,6 +97,42 @@ export function deployWithConfig(serviceDir, config) {
     process.off("SIGTERM", cleanup);
     process.off("uncaughtException", cleanup);
   }
+}
+
+export function deployWithConfig(serviceDir, config) {
+  runWithTempConfig(serviceDir, config, ["deploy"]);
+}
+
+/**
+ * Applies migrations_dir/migrations_pattern (from the base config's matching
+ * d1_databases entry) to a freshly-provisioned ephemeral D1 database — the
+ * D1 equivalent of what Neon branching gives Postgres for free. A no-op if
+ * the base entry declares no migrations_dir.
+ */
+export function applyD1Migrations(serviceDir, baseConfig, binding, databaseName, databaseId) {
+  const baseEntry = (baseConfig.d1_databases ?? []).find((d) => d.binding === binding);
+  if (!baseEntry?.migrations_dir) return;
+
+  const migrationsConfig = {
+    main: baseConfig.main,
+    compatibility_date: baseConfig.compatibility_date,
+    d1_databases: [
+      {
+        binding,
+        database_name: databaseName,
+        database_id: databaseId,
+        migrations_dir: baseEntry.migrations_dir,
+        ...(baseEntry.migrations_pattern ? { migrations_pattern: baseEntry.migrations_pattern } : {}),
+      },
+    ],
+  };
+  runWithTempConfig(serviceDir, migrationsConfig, [
+    "d1",
+    "migrations",
+    "apply",
+    databaseName,
+    "--remote",
+  ]);
 }
 
 export function putSecret(serviceDir, workerName, secretName, value) {

@@ -32,3 +32,17 @@ const NAME_PATTERN = /^[a-z]{2,15}-[a-z]{2,15}-[a-z]{2,15}-\d{5}$/;
 export function isValidEnvironmentName(name) {
   return NAME_PATTERN.test(name);
 }
+
+/**
+ * Builds the name for a resource `el` provisions on behalf of one binding —
+ * `{env}-{serviceKey}-{binding}`, lowercased and hyphenated. R2 bucket names
+ * specifically must be lowercase, DNS-compliant, and 63 characters or fewer;
+ * this satisfies that for every resource type rather than having per-type
+ * naming rules drift apart, since a binding name like `MY_QUEUE` is common
+ * and would otherwise produce an invalid bucket name.
+ */
+export function resourceName(environmentName, serviceKey, binding) {
+  const slug = binding.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/^-+|-+$/g, "");
+  const name = `${environmentName}-${serviceKey}-${slug}`;
+  return name.length <= 63 ? name : name.slice(0, 63).replace(/-+$/, "");
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generateEnvironmentName, isValidEnvironmentName } from "../src/names.mjs";
+import { generateEnvironmentName, isValidEnvironmentName, resourceName } from "../src/names.mjs";
 
 describe("generateEnvironmentName", () => {
   it("produces a name matching its own validator", () => {
@@ -34,5 +34,34 @@ describe("isValidEnvironmentName", () => {
     ["arbitrary user input", "production"],
   ])("rejects %s", (_label, name) => {
     expect(isValidEnvironmentName(name)).toBe(false);
+  });
+});
+
+describe("resourceName", () => {
+  it("joins env, service key, and lowercased binding with hyphens", () => {
+    expect(resourceName("blue-honey-badger-12345", "api", "DB")).toBe(
+      "blue-honey-badger-12345-api-db",
+    );
+  });
+
+  // R2 bucket names specifically must be lowercase and DNS-compliant, and a
+  // binding name with underscores (MY_QUEUE, common in wrangler configs)
+  // would otherwise produce an invalid bucket name.
+  it("replaces underscores and other non-alphanumerics with hyphens", () => {
+    expect(resourceName("n", "api", "MY_QUEUE")).toBe("n-api-my-queue");
+  });
+
+  it("collapses runs of separators rather than leaving them adjacent", () => {
+    expect(resourceName("n", "api", "MY__WEIRD--BINDING")).toBe("n-api-my-weird-binding");
+  });
+
+  it("strips a leading or trailing separator produced by the binding name itself", () => {
+    expect(resourceName("n", "api", "_LEADING")).toBe("n-api-leading");
+  });
+
+  it("truncates to 63 characters without leaving a trailing hyphen", () => {
+    const long = resourceName("n", "api", "A".repeat(80));
+    expect(long.length).toBeLessThanOrEqual(63);
+    expect(long.endsWith("-")).toBe(false);
   });
 });

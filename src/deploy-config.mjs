@@ -14,7 +14,8 @@
 //
 // The fix: build the deployed config from an explicit allowlist of
 // structural keys, and refuse to silently carry forward anything that binds
-// to a stateful resource.
+// to a stateful resource UNLESS `up.mjs` has already provisioned a fresh,
+// environment-scoped substitute for it (see OVERRIDABLE_STATEFUL_KEYS).
 
 const SAFE_STRUCTURAL_KEYS = [
   "$schema",
@@ -24,17 +25,27 @@ const SAFE_STRUCTURAL_KEYS = [
   "observability",
   "account_id",
   "node_compat",
+  // A Durable Object class lives inside the Worker script being deployed,
+  // not in a separately provisioned resource — a fresh Worker name under a
+  // new environment gets fresh DO storage automatically. There is nothing
+  // for `el` to provision, and nothing shared with production to leak.
+  // `migrations` travels with `durable_objects` for the same reason: both
+  // describe this deploy's own script, not an external resource.
+  "durable_objects",
+  "migrations",
 ];
 
-// Anything that binds to a real, shared resource. Carried forward only if a
-// service opts in with unsafeInheritBindings — named that deliberately, so
-// choosing it reads as a choice, not a default.
+// Bind to a real, external resource. Carried forward from the committed
+// config only if a service opts in with unsafeInheritBindings (still named
+// deliberately) — OR overridden entirely with a fresh, environment-scoped
+// resource `up.mjs` already created, in which case the override wins and no
+// opt-in is needed, because there's nothing production-pointing left to
+// silently inherit.
 const STATEFUL_BINDING_KEYS = [
   "d1_databases",
   "kv_namespaces",
   "r2_buckets",
   "queues",
-  "durable_objects",
   "ai",
   "vectorize",
   "browser",
@@ -56,23 +67,33 @@ const STATEFUL_BINDING_KEYS = [
 // production traffic to a disposable Worker.
 const NEVER_INHERITED_KEYS = ["routes", "route", "triggers"];
 
-export function buildDeployConfig(baseConfig, { name, vars, hyperdrive, unsafeInheritBindings }) {
+export function buildDeployConfig(
+  baseConfig,
+  { name, vars, hyperdrive, unsafeInheritBindings, overrides = {} },
+) {
   const deployConfig = {};
   for (const key of SAFE_STRUCTURAL_KEYS) {
     if (key in baseConfig) deployConfig[key] = baseConfig[key];
   }
 
-  const foundStateful = STATEFUL_BINDING_KEYS.filter((key) => key in baseConfig);
+  const overriddenKeys = new Set(Object.keys(overrides));
+  const foundStateful = STATEFUL_BINDING_KEYS.filter(
+    (key) => key in baseConfig && !overriddenKeys.has(key),
+  );
   if (foundStateful.length > 0) {
     if (!unsafeInheritBindings) {
       throw new Error(
         `wrangler.jsonc declares ${foundStateful.join(", ")}, which would deploy this ` +
-          `ephemeral environment with live access to those production resources. Set ` +
-          `unsafeInheritBindings: true on this service in el.config.mjs if that's really ` +
-          `what you want — the name is deliberate.`,
+          `ephemeral environment with live access to those production resources. Declare ` +
+          `a matching d1/kv/r2/queues entry in el.config.mjs so el provisions a fresh one, ` +
+          `or set unsafeInheritBindings: true on this service if inheriting production is ` +
+          `really what you want — the name is deliberate.`,
       );
     }
     for (const key of foundStateful) deployConfig[key] = baseConfig[key];
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    deployConfig[key] = value;
   }
 
   const foundNeverInherited = NEVER_INHERITED_KEYS.filter((key) => key in baseConfig);
@@ -89,4 +110,44 @@ export function buildDeployConfig(baseConfig, { name, vars, hyperdrive, unsafeIn
   if (hyperdrive) deployConfig.hyperdrive = hyperdrive;
 
   return deployConfig;
+}
+
+/** Builds the `d1_databases` array for freshly-provisioned ephemeral databases. */
+export function buildD1DatabasesOverride(entries, ids) {
+  return entries.map((entry) => ({
+    binding: entry.binding,
+    database_name: ids[entry.binding].name,
+    database_id: ids[entry.binding].id,
+  }));
+}
+
+/** Builds the `kv_namespaces` array for freshly-provisioned ephemeral namespaces. */
+export function buildKvNamespacesOverride(entries, ids) {
+  return entries.map((entry) => ({ binding: entry.binding, id: ids[entry.binding] }));
+}
+
+/** Builds the `r2_buckets` array for freshly-provisioned ephemeral buckets. */
+export function buildR2BucketsOverride(entries, names) {
+  return entries.map((entry) => ({ binding: entry.binding, bucket_name: names[entry.binding] }));
+}
+
+/**
+ * Builds the `queues` object (producers + consumers) for freshly-provisioned
+ * ephemeral queues. Consumer settings (max_batch_size, retry policy, dead
+ * letter queue, ...) are copied from the base config only when it declares
+ * exactly one consumer — with more than one, which base consumer belongs to
+ * which binding is genuinely ambiguous without a name/binding key at the
+ * consumer level, so this falls back to wrangler's own defaults rather than
+ * guessing. Override with configure() if that's not right for your case.
+ */
+export function buildQueuesOverride(baseConfig, entries, names) {
+  const producers = entries.map((entry) => ({ binding: entry.binding, queue: names[entry.binding] }));
+
+  const baseConsumers = baseConfig.queues?.consumers ?? [];
+  const baseConsumerSettings = baseConsumers.length === 1 ? baseConsumers[0] : {};
+  const consumers = entries
+    .filter((entry) => entry.consumer)
+    .map((entry) => ({ ...baseConsumerSettings, queue: names[entry.binding] }));
+
+  return { producers, consumers };
 }

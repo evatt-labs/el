@@ -24,16 +24,21 @@ npx @evatt-labs/el down blue-honey-badger-12345
    exists because that happened once — see [Notes](#notes).
 3. Creates a Hyperdrive config per service that needs one, bound to that
    verified role — never to the role migrations run as.
-4. Deploys each configured service as a Cloudflare Worker named
+4. Provisions a fresh D1 database, KV namespace, R2 bucket, and/or queue for
+   every one a service declares — never pointed at the resource your real
+   deployment uses. D1 gets `migrations_dir` applied automatically if your
+   `wrangler.jsonc` declares one, the closest D1 gets to what Neon branching
+   gives Postgres for free.
+5. Deploys each configured service as a Cloudflare Worker named
    `{environment}-{service key}`, from an **allowlisted** copy of your
    `wrangler.jsonc` — see [Bindings](#bindings-are-not-inherited-by-default)
    below for why that's not "the whole file with a few fields overwritten."
-5. Runs your `seed()` hook, if you have one, against the branch.
-6. Opens whatever URLs your `open()` hook returns in your browser.
+6. Runs your `seed()` hook, if you have one, against the branch.
+7. Opens whatever URLs your `open()` hook returns in your browser.
 
-`el` knows about Neon, Cloudflare Workers, and Hyperdrive. It knows nothing
-about your application — auth, seed data, and which URLs are worth a look
-are entirely up to the hooks you provide.
+`el` knows about Neon, Cloudflare Workers, Hyperdrive, D1, KV, R2, and
+Queues. It knows nothing about your application — auth, seed data, and
+which URLs are worth a look are entirely up to the hooks you provide.
 
 ## Requirements
 
@@ -80,7 +85,15 @@ export default {
 
   services: [
     { key: "auth", dir: "packages/auth" },
-    { key: "api", dir: "packages/api", hyperdrive: { binding: "HYPERDRIVE" } },
+    {
+      key: "api",
+      dir: "packages/api",
+      hyperdrive: { binding: "HYPERDRIVE" },
+      d1: [{ binding: "DB" }],       // fresh database; migrations_dir applied if declared
+      kv: [{ binding: "CACHE" }],    // fresh, empty namespace
+      r2: [{ binding: "ASSETS" }],   // fresh, empty bucket
+      queues: [{ binding: "JOBS", consumer: true }],  // fresh queue, producer + consumer
+    },
   ],
 
   // Called once, before any deploys. ctx.urls is already populated —
@@ -117,40 +130,65 @@ export default {
 };
 ```
 
-Every field under `services[]` and `neon` is required except `hyperdrive`
-and `unsafeInheritBindings`. All three hooks are optional.
+Under `services[]`, only `key` and `dir` are required — `hyperdrive`, `d1`,
+`kv`, `r2`, `queues`, and `unsafeInheritBindings` are all optional. Every
+field under `neon` is required. All three hooks are optional.
 
 ## Bindings are not inherited by default
 
 An ephemeral environment deploys from an **allowlist** of your
 `wrangler.jsonc` — `main`, `compatibility_date`, `compatibility_flags`,
-`observability`, plus whatever `configure()` returns for `vars` and the
-Hyperdrive binding `el` creates itself. Nothing else in the file is carried
-forward.
+`observability`, `durable_objects`/`migrations`, plus whatever `configure()`
+returns for `vars` and whatever `el` itself provisioned (Hyperdrive, D1, KV,
+R2, queues). Nothing else in the file is carried forward.
 
 This is deliberate, and it wasn't always true: the first version of `el`
 mutated the loaded config in place, overwriting only `name`/`vars`/
 `hyperdrive` and leaving everything else — including any D1 database, KV
-namespace, R2 bucket, queue, or Durable Object binding — untouched. An
-"ephemeral, disposable" preview environment had live read/write access to
-whatever production resources those bindings pointed at. A security audit
-caught it; nothing about it was intentional, and it's the reason this
-section exists.
+namespace, R2 bucket, or queue binding — untouched. An "ephemeral,
+disposable" preview environment had live read/write access to whatever
+production resources those bindings pointed at. A security audit caught it;
+nothing about it was intentional, and it's the reason this section exists.
 
-If a service genuinely needs one of those bindings in its preview
-environment, opt in explicitly:
+Every stateful binding has three ways to be handled, in order of preference:
 
-```js
-services: [
-  { key: "worker", dir: "packages/worker", unsafeInheritBindings: true },
-],
-```
+1. **Declare it in `el.config.mjs`** (`d1`/`kv`/`r2`/`queues` on the
+   service) — `el` provisions a fresh, environment-scoped resource and
+   deploys with that instead. This is almost always what you want.
+2. **`unsafeInheritBindings: true`** — carries the committed binding forward
+   verbatim, pointed at whatever it points at in production. The name is
+   deliberate.
+3. **Neither** — `el` refuses to deploy and tells you which binding forced
+   the refusal.
+
+`durable_objects` needs neither: a DO class lives inside the Worker script
+being deployed, not a separately provisioned resource, so a fresh Worker
+name under a new environment gets fresh DO storage automatically. It's
+always carried forward, along with its paired `migrations` block.
 
 `routes`, `route`, and `triggers` (cron schedules) are **never** carried
-forward, even with that flag — reassigning a route or trigger during an
-ephemeral deploy can redirect real production traffic to a disposable
-Worker, which is a sharper failure mode than an ephemeral Worker reading
-prod data.
+forward, even with `unsafeInheritBindings` — reassigning a route or trigger
+during an ephemeral deploy can redirect real production traffic to a
+disposable Worker, which is a sharper failure mode than an ephemeral Worker
+reading prod data.
+
+### Queue consumers need a real handler
+
+Marking a queue binding `consumer: true` only succeeds if the deployed
+Worker's own code exports a `queue()` handler — Cloudflare rejects
+attaching a consumer trigger to a Worker that doesn't implement one, the
+same as it would for a real deployment. This was found by testing a live
+deploy, not documented from assumption: the producer binding and every
+other resource type deployed successfully in that test; only the consumer
+trigger failed, with a clear `[code: 11001]` error from Cloudflare. If your
+service doesn't have a `queue()` export yet, leave `consumer` unset (or
+`false`) and it'll still get the producer binding.
+
+### R2 buckets are emptied before deletion
+
+R2 refuses to delete a non-empty bucket. Since a preview app may have
+written real objects to an ephemeral bucket during testing, `el down` lists
+and deletes every object first — best-effort, same as the rest of teardown.
 
 ## Releasing
 
@@ -196,6 +234,17 @@ behind before cleanup runs.
 - `open()`'s URLs are validated to be `http:`/`https:` before opening, but
   `el` cannot audit what a hook itself does with your loaded environment —
   see [Trust model](#trust-model).
+- **Queues are per-service, not shared.** A queue produced by one service
+  and consumed by a different one in the same environment isn't wired
+  automatically — same limitation Hyperdrive already has. Declare the queue
+  binding on whichever service needs it; cross-service wiring is a
+  reasonable thing to want, just not built yet.
+- If your `wrangler.jsonc` declares more than one queue consumer, `el`
+  can't tell which consumer's settings (`max_batch_size`, retry policy,
+  dead letter queue) belong to which binding — there's no name/binding key
+  at the consumer level to match on. With exactly one, it's copied forward;
+  with more than one, provisioned consumers get wrangler's defaults, not
+  your production settings. Override via `configure()` if that's not right.
 
 ## Notes
 

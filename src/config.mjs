@@ -74,6 +74,32 @@ export function validate(config) {
     ) {
       fail(`service "${service.key}": unsafeInheritBindings must be a boolean if set`);
     }
+
+    for (const field of ["d1", "kv", "r2"]) {
+      if (service[field] === undefined) continue;
+      if (!Array.isArray(service[field])) {
+        fail(`service "${service.key}": ${field} must be an array if provided`);
+      }
+      for (const entry of service[field]) {
+        if (typeof entry?.binding !== "string" || entry.binding === "") {
+          fail(`service "${service.key}": each ${field} entry needs a non-empty binding`);
+        }
+      }
+    }
+
+    if (service.queues !== undefined) {
+      if (!Array.isArray(service.queues)) {
+        fail(`service "${service.key}": queues must be an array if provided`);
+      }
+      for (const entry of service.queues) {
+        if (typeof entry?.binding !== "string" || entry.binding === "") {
+          fail(`service "${service.key}": each queues entry needs a non-empty binding`);
+        }
+        if (entry.consumer !== undefined && typeof entry.consumer !== "boolean") {
+          fail(`service "${service.key}": queues entry "${entry.binding}".consumer must be a boolean if set`);
+        }
+      }
+    }
   }
 
   for (const hook of ["configure", "seed", "open"]) {

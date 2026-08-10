@@ -67,3 +67,99 @@ export async function createHyperdriveConfig(token, accountId, name, connection)
     );
   }
 }
+
+// --- D1 --------------------------------------------------------------------
+
+export async function createD1Database(token, accountId, name) {
+  const result = await cfFetch(token, `/accounts/${accountId}/d1/database`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+  return result.uuid;
+}
+
+export async function findD1DatabaseByName(token, accountId, name) {
+  const databases = await cfFetch(token, `/accounts/${accountId}/d1/database`);
+  return databases.find((d) => d.name === name) ?? null;
+}
+
+export async function deleteD1Database(token, accountId, databaseId) {
+  await cfFetch(token, `/accounts/${accountId}/d1/database/${databaseId}`, { method: "DELETE" });
+}
+
+// --- KV ----------------------------------------------------------------------
+
+export async function createKvNamespace(token, accountId, title) {
+  const result = await cfFetch(token, `/accounts/${accountId}/storage/kv/namespaces`, {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
+  return result.id;
+}
+
+export async function findKvNamespaceByTitle(token, accountId, title) {
+  const namespaces = await cfFetch(token, `/accounts/${accountId}/storage/kv/namespaces`);
+  return namespaces.find((ns) => ns.title === title) ?? null;
+}
+
+export async function deleteKvNamespace(token, accountId, namespaceId) {
+  await cfFetch(token, `/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`, {
+    method: "DELETE",
+  });
+}
+
+// --- R2 ------------------------------------------------------------------
+// R2 buckets are referenced by name directly — there is no separate id, so
+// no find-by-name lookup is needed before delete the way D1/KV/Queues need.
+
+export async function createR2Bucket(token, accountId, name) {
+  const result = await cfFetch(token, `/accounts/${accountId}/r2/buckets`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+  return result.name;
+}
+
+/**
+ * R2 refuses to delete a non-empty bucket. An ephemeral bucket only exists
+ * for the environment's lifetime, but the preview app itself may have
+ * written objects to it during testing — so this empties it first rather
+ * than assuming it's already empty. Best-effort: a bucket that fails to
+ * empty is reported, not silently left behind.
+ */
+export async function deleteR2Bucket(token, accountId, name) {
+  let cursor;
+  do {
+    const page = await cfFetch(
+      token,
+      `/accounts/${accountId}/r2/buckets/${name}/objects${cursor ? `?cursor=${cursor}` : ""}`,
+    );
+    for (const object of page.objects ?? []) {
+      await cfFetch(token, `/accounts/${accountId}/r2/buckets/${name}/objects/${encodeURIComponent(object.key)}`, {
+        method: "DELETE",
+      });
+    }
+    cursor = page.cursor;
+  } while (cursor);
+
+  await cfFetch(token, `/accounts/${accountId}/r2/buckets/${name}`, { method: "DELETE" });
+}
+
+// --- Queues ------------------------------------------------------------------
+
+export async function createQueue(token, accountId, name) {
+  const result = await cfFetch(token, `/accounts/${accountId}/queues`, {
+    method: "POST",
+    body: JSON.stringify({ queue_name: name }),
+  });
+  return result.queue_id;
+}
+
+export async function findQueueByName(token, accountId, name) {
+  const queues = await cfFetch(token, `/accounts/${accountId}/queues`);
+  return queues.find((q) => q.queue_name === name) ?? null;
+}
+
+export async function deleteQueue(token, accountId, queueId) {
+  await cfFetch(token, `/accounts/${accountId}/queues/${queueId}`, { method: "DELETE" });
+}
