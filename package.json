@@ -1,0 +1,38 @@
+{
+  "name": "@evatt-labs/el",
+  "version": "0.1.0",
+  "description": "Ephemeral full-stack preview environments on Cloudflare Workers + Neon — spin up a named, disposable environment and tear it down on command.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "el": "./bin/el.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "neon",
+    "preview-environments",
+    "ephemeral",
+    "ci",
+    "hyperdrive"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evatt-labs/el.git"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  }
+}
