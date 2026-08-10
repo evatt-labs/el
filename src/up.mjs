@@ -25,6 +25,7 @@ import {
 } from "./deploy-config.mjs";
 import { waitForConnectable, assertNoBypassRls, runSql, quoteLiteral } from "./postgres.mjs";
 import { parseConnectionUri } from "./connection-uri.mjs";
+import { waitForReachable } from "./reachability.mjs";
 import { openUrl } from "./browser.mjs";
 
 /**
@@ -183,6 +184,16 @@ export async function up(config, requestedName) {
       putSecret(serviceDir, workerName, secretName, value);
     }
   }
+
+  // Every environment gets a workers.dev hostname that has never existed
+  // before, and Cloudflare's own docs say a first deploy to a new
+  // subdomain can show edge errors "while DNS is propagating" — not a
+  // one-off, a property of this tool's naming pattern. Wait for each URL
+  // to clear before declaring the environment ready or opening a browser
+  // tab into that exact window. Run in parallel — deploys already happened
+  // sequentially above, no reason to serialize the waits too.
+  console.log("-> Waiting for deployed Workers to become reachable...");
+  await Promise.all(Object.values(urls).map((url) => waitForReachable(url)));
 
   let seedResult = {};
   if (config.seed) {
