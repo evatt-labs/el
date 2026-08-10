@@ -13,6 +13,11 @@ Usage:
 Requires an el.config.mjs in the current directory, and NEON_API_KEY,
 CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID in the environment or a .env
 file. See https://github.com/evatt-labs/el for the config format.
+
+el.config.mjs runs as ordinary Node code with full access to your
+environment (including NEON_API_KEY/CLOUDFLARE_API_TOKEN) — only run
+\`el up\`/\`el down\` against a config you trust. Never wire this into a
+workflow that runs against an untrusted fork's branch.
 `;
 
 async function main() {
@@ -23,14 +28,15 @@ async function main() {
     return;
   }
 
-  const config = await loadConfig();
-
+  // el.config.mjs is arbitrary code in the current directory (that's the
+  // point — it's the extension mechanism) — only load it once the command
+  // actually needs it, not for `el <typo>`.
   if (command === "up") {
-    await up(config, arg);
+    await up(await loadConfig(), arg);
     return;
   }
   if (command === "down") {
-    await down(config, arg);
+    await down(await loadConfig(), arg);
     return;
   }
 

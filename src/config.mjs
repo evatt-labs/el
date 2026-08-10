@@ -6,8 +6,11 @@
 // application — auth schemes, JWT signing, seed data, and which URLs are
 // worth opening in a browser are all yours to supply via hooks.
 
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
 
 function fail(message) {
   throw new Error(`Invalid el.config.mjs: ${message}`);
@@ -15,17 +18,16 @@ function fail(message) {
 
 export async function loadConfig() {
   const configPath = path.join(process.cwd(), "el.config.mjs");
-  let mod;
-  try {
-    mod = await import(pathToFileURL(configPath).href);
-  } catch (error) {
-    if (error.code === "ERR_MODULE_NOT_FOUND") {
-      throw new Error(
-        "No el.config.mjs found in the current directory. See the README for the config shape.",
-      );
-    }
-    throw error;
+  if (!existsSync(configPath)) {
+    throw new Error(
+      "No el.config.mjs found in the current directory. See the README for the config shape.",
+    );
   }
+  // Checked existence first specifically so an import error INSIDE a config
+  // that does exist (a missing dependency, a syntax error) surfaces as
+  // itself, rather than being misreported as "no config found" — both raise
+  // the same ERR_MODULE_NOT_FOUND when Node can't resolve something.
+  const mod = await import(pathToFileURL(configPath).href);
   const config = mod.default;
   validate(config);
   return config;
@@ -43,8 +45,11 @@ export function validate(config) {
   if (typeof neon?.database !== "string" || neon.database === "") {
     fail("neon.database must be a non-empty string");
   }
-  if (typeof neon?.appRole !== "string" || neon.appRole === "") {
-    fail("neon.appRole must be a non-empty string (the least-privilege role Hyperdrive connects as)");
+  if (typeof neon?.appRole !== "string" || !IDENTIFIER.test(neon.appRole)) {
+    fail(
+      "neon.appRole must be a valid Postgres identifier (the least-privilege role Hyperdrive " +
+        `connects as) — got ${JSON.stringify(neon?.appRole)}`,
+    );
   }
 
   if (!Array.isArray(services) || services.length === 0) {
@@ -62,6 +67,12 @@ export function validate(config) {
     }
     if (service.hyperdrive && typeof service.hyperdrive.binding !== "string") {
       fail(`service "${service.key}": hyperdrive.binding must be a string when hyperdrive is set`);
+    }
+    if (
+      service.unsafeInheritBindings !== undefined &&
+      typeof service.unsafeInheritBindings !== "boolean"
+    ) {
+      fail(`service "${service.key}": unsafeInheritBindings must be a boolean if set`);
     }
   }
 

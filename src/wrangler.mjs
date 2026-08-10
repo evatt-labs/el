@@ -2,8 +2,36 @@
 // without touching the committed file.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+/**
+ * Finds a locally-installed wrangler by walking up from serviceDir, the way
+ * Node itself resolves node_modules. Deliberately does NOT fall back to
+ * `npx wrangler`: npx does not consult PATH, and in a directory with no
+ * local install it silently downloads and runs the latest, unpinned,
+ * unverified wrangler from the registry — in a process already holding
+ * Cloudflare and Neon credentials. A registry compromise of wrangler would
+ * land directly on those. Failing here with a clear message is the
+ * intentional trade for that risk, not an oversight.
+ */
+function findWranglerBin(startDir) {
+  let dir = path.resolve(startDir);
+  const binName = process.platform === "win32" ? "wrangler.cmd" : "wrangler";
+  while (true) {
+    const candidate = path.join(dir, "node_modules", ".bin", binName);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      throw new Error(
+        `Could not find a locally-installed wrangler above ${startDir}. ` +
+          `Add wrangler as a devDependency of this service (or the workspace root) — ` +
+          `el will not fall back to \`npx wrangler\`, which would run an unpinned version.`,
+      );
+    }
+    dir = parent;
+  }
+}
 
 /**
  * Strips full-line `//` comments from JSONC. Only safe for configs whose
@@ -32,22 +60,47 @@ export function loadWranglerConfig(serviceDir) {
  * resolves `main` and other relative paths against the CONFIG FILE's
  * location, not the process cwd. A temp file elsewhere makes `./src/index.ts`
  * resolve to a path that doesn't exist.
+ *
+ * mode 0o600 + the "wx" flag are both load-bearing: 0o600 keeps the file
+ * unreadable to other local users for the (brief) window it exists, and
+ * "wx" refuses to follow a pre-existing symlink at that path (verified —
+ * writeFileSync follows symlinks by default) rather than writing through it.
+ * Signal handlers exist because `finally` alone does not run on Ctrl-C —
+ * execFileSync blocks the event loop, so SIGINT is deferred until the sync
+ * call returns and Node's default disposition then terminates without
+ * unwinding the JS stack, leaving the file on disk otherwise.
+ *
+ * This file can contain whatever `configure()` returned for `vars` — plain
+ * Worker vars, not secrets, but still worth not leaving lying around inside
+ * what's usually a git working tree. Consumers should gitignore
+ * `.el-deploy-*.json`.
  */
 export function deployWithConfig(serviceDir, config) {
+  const wrangler = findWranglerBin(serviceDir);
   const configPath = path.join(serviceDir, `.el-deploy-${String(process.pid)}.json`);
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+
+  const cleanup = () => rmSync(configPath, { force: true });
+  process.once("SIGINT", cleanup);
+  process.once("SIGTERM", cleanup);
+  process.once("uncaughtException", cleanup);
+
   try {
-    execFileSync("npx", ["wrangler", "deploy", "--config", configPath], {
+    execFileSync(wrangler, ["deploy", "--config", configPath], {
       cwd: serviceDir,
       stdio: "inherit",
     });
   } finally {
-    rmSync(configPath, { force: true });
+    cleanup();
+    process.off("SIGINT", cleanup);
+    process.off("SIGTERM", cleanup);
+    process.off("uncaughtException", cleanup);
   }
 }
 
 export function putSecret(serviceDir, workerName, secretName, value) {
-  execFileSync("npx", ["wrangler", "secret", "put", secretName, "--name", workerName], {
+  const wrangler = findWranglerBin(serviceDir);
+  execFileSync(wrangler, ["secret", "put", secretName, "--name", workerName], {
     cwd: serviceDir,
     input: value,
     stdio: ["pipe", "inherit", "inherit"],
@@ -56,26 +109,12 @@ export function putSecret(serviceDir, workerName, secretName, value) {
 
 export function deleteWorker(serviceDir, workerName) {
   try {
-    execFileSync("npx", ["wrangler", "delete", "--name", workerName, "--force"], {
+    const wrangler = findWranglerBin(serviceDir);
+    execFileSync(wrangler, ["delete", "--name", workerName, "--force"], {
       cwd: serviceDir,
       stdio: "inherit",
     });
   } catch (error) {
     console.warn(`  (delete of ${workerName} failed or it didn't exist — continuing)`, String(error.message ?? error));
   }
-}
-
-/** Creates a Hyperdrive config and returns its id, parsed from wrangler's own output. */
-export function createHyperdriveConfig(serviceDir, name, connectionString) {
-  const output = execFileSync(
-    "npx",
-    ["wrangler", "hyperdrive", "create", name, `--connection-string=${connectionString}`],
-    { cwd: serviceDir, encoding: "utf8" },
-  );
-  process.stdout.write(output);
-  const match = /Created new Hyperdrive PostgreSQL config: ([a-f0-9]+)/.exec(output);
-  if (!match) {
-    throw new Error("Could not parse Hyperdrive config id from wrangler output");
-  }
-  return match[1];
 }

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No secrets are needed to run tests, so none are exposed here — this
+# workflow runs on ordinary `pull_request` (not `pull_request_target`),
+# which never receives repository secrets for a fork's PR by default.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA, not a floating tag — see publish.yml
+      # for why that matters more once secrets are in scope; kept
+      # consistent here too so both workflows follow the same rule.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - run: npm ci --ignore-scripts
+      - run: npm test

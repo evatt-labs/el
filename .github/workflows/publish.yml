@@ -1,0 +1,55 @@
+name: Publish
+
+# Tag push only — never `pull_request` or `pull_request_target`. This is
+# the single most load-bearing line in this file: a trigger an external
+# contributor could influence (a PR event, a workflow_dispatch accepting an
+# arbitrary ref) would mean a fork's code running with publish credentials
+# in scope. Publishing only happens when someone with push access to this
+# repo pushes a `v*` tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # First publish must be done manually (`npm publish --provenance
+    # --access public`, from an authenticated npm account with 2FA) —
+    # trusted publishing is configured on an EXISTING package's settings
+    # page on npmjs.com, so there is no way for this workflow to bootstrap
+    # its own trust. After that one manual publish, add this repo +
+    # workflow filename as a trusted publisher for @evatt-labs/el on
+    # npmjs.com (or `npm trust github`), and every push of a `v*` tag from
+    # here on publishes with no stored token at all.
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Prevents a compromised dependency's install/lifecycle script
+          # from reading GITHUB_TOKEN out of .git/config.
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # No lifecycle scripts today (see package.json) — keep it that way,
+      # and --ignore-scripts means a future dependency doesn't get to add
+      # one silently.
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+      # id-token: write below is what lets npm exchange this job's OIDC
+      # token for a short-lived publish credential — no NPM_TOKEN secret
+      # exists in this repo at all. --provenance is redundant with what
+      # trusted publishing already does automatically for a public package
+      # from a public repo, but it's cheap to be explicit about intent.
+      - run: npm publish --provenance

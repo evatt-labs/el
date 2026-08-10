@@ -7,9 +7,11 @@ import {
   createBranch,
   getConnectionUri,
 } from "./neon.mjs";
-import { getWorkersSubdomain } from "./cloudflare.mjs";
-import { loadWranglerConfig, deployWithConfig, putSecret, createHyperdriveConfig } from "./wrangler.mjs";
-import { waitForConnectable, assertNoBypassRls, runSql } from "./postgres.mjs";
+import { getWorkersSubdomain, createHyperdriveConfig } from "./cloudflare.mjs";
+import { loadWranglerConfig, deployWithConfig, putSecret } from "./wrangler.mjs";
+import { buildDeployConfig } from "./deploy-config.mjs";
+import { waitForConnectable, assertNoBypassRls, runSql, quoteLiteral } from "./postgres.mjs";
+import { parseConnectionUri } from "./connection-uri.mjs";
 import { openUrl } from "./browser.mjs";
 
 export async function up(config, requestedName) {
@@ -58,15 +60,16 @@ export async function up(config, requestedName) {
     urls[service.key] = `https://${name}-${service.key}.${subdomain}.workers.dev`;
   }
 
+  const appConnection = parseConnectionUri(appUri);
   const hyperdriveIds = {};
   for (const service of config.services) {
     if (!service.hyperdrive) continue;
     console.log(`-> Creating Hyperdrive config for "${service.key}"...`);
-    const serviceDir = path.resolve(process.cwd(), service.dir);
-    hyperdriveIds[service.key] = createHyperdriveConfig(
-      serviceDir,
+    hyperdriveIds[service.key] = await createHyperdriveConfig(
+      CLOUDFLARE_API_TOKEN,
+      CLOUDFLARE_ACCOUNT_ID,
       `${name}-${service.key}-hyperdrive`,
-      appUri,
+      appConnection,
     );
   }
 
@@ -83,16 +86,16 @@ export async function up(config, requestedName) {
     console.log(`-> Deploying "${name}-${service.key}"...`);
     const serviceDir = path.resolve(process.cwd(), service.dir);
     const workerName = `${name}-${service.key}`;
-    const serviceConfig = loadWranglerConfig(serviceDir);
-    serviceConfig.name = workerName;
-    delete serviceConfig.env;
-    serviceConfig.vars = vars[service.key] ?? {};
-    if (service.hyperdrive) {
-      serviceConfig.hyperdrive = [
-        { binding: service.hyperdrive.binding, id: hyperdriveIds[service.key] },
-      ];
-    }
-    deployWithConfig(serviceDir, serviceConfig);
+    const baseConfig = loadWranglerConfig(serviceDir);
+    const deployConfig = buildDeployConfig(baseConfig, {
+      name: workerName,
+      vars: vars[service.key] ?? {},
+      hyperdrive: service.hyperdrive
+        ? [{ binding: service.hyperdrive.binding, id: hyperdriveIds[service.key] }]
+        : undefined,
+      unsafeInheritBindings: service.unsafeInheritBindings ?? false,
+    });
+    deployWithConfig(serviceDir, deployConfig);
 
     const serviceSecrets = secrets[service.key] ?? {};
     for (const [secretName, value] of Object.entries(serviceSecrets)) {
@@ -109,6 +112,7 @@ export async function up(config, requestedName) {
         urls,
         ownerConnectionString: ownerUri,
         runSql: (sql) => runSql(ownerUri, sql),
+        quoteLiteral,
       })) ?? {};
   }
 

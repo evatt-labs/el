@@ -24,7 +24,10 @@ export function generateEnvironmentName() {
   return `${pick(COLORS)}-${pick(ADJECTIVES)}-${pick(ANIMALS)}-${String(suffix)}`;
 }
 
-const NAME_PATTERN = /^[a-z]+-[a-z]+-[a-z]+-\d{5}$/;
+// Bounded word lengths (2-15): unbounded `[a-z]+` accepts arbitrarily long
+// names that would fail downstream at Neon/Cloudflare anyway, but there's no
+// reason to let something that long reach those APIs in the first place.
+const NAME_PATTERN = /^[a-z]{2,15}-[a-z]{2,15}-[a-z]{2,15}-\d{5}$/;
 
 export function isValidEnvironmentName(name) {
   return NAME_PATTERN.test(name);
