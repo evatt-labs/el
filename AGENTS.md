@@ -17,10 +17,13 @@ in `CHANGELOG.md`. Prefix every commit:
 - `fix:` — patch release
 - `feat:` — minor release
 - `feat!:` / `fix!:` / a `BREAKING CHANGE:` footer — major release
-- `chore:`, `docs:`, `test:`, `refactor:` — no release, but still shows up
-  in the changelog under its own section
+- `chore:`, `docs:`, `test:`, `refactor:` — parsed, but not "user facing."
+  On their own they open no release PR and produce no changelog entry.
+  They only ride along in the changelog of a PR that a `feat`/`fix` commit
+  already caused to open. Verified: a solo `chore:` commit logged
+  "No user facing commits found... skipping" and opened nothing.
 
-A commit with no recognized prefix is not picked up by release-please at
+A commit with no recognized prefix isn't picked up by release-please at
 all: it won't appear in the changelog and won't trigger a version bump.
 
 ### The release PR
@@ -51,8 +54,16 @@ step must be done manually, once, from an authenticated npm account with
 2FA:
 
 ```sh
-npm publish --provenance --access public
+npm publish --access public
 ```
+
+No `--provenance` here. npm only generates a provenance attestation when
+the publish runs inside a supported CI provider's OIDC context (GitHub
+Actions or GitLab CI); it fails outright on a local machine. `publish.yml`
+already runs `npm publish --provenance` from GitHub Actions, so every
+release after this bootstrap gets provenance automatically, and once
+trusted publishing is configured (next step) it's generated regardless of
+the flag.
 
 Then, on npmjs.com, add `evatt-labs/el` and `publish.yml` as this
 package's trusted publisher (or `npm trust github @evatt-labs/el`). Every
