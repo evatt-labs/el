@@ -1,6 +1,8 @@
 # el
 
 [![CI](https://github.com/evatt-labs/el/actions/workflows/ci.yml/badge.svg)](https://github.com/evatt-labs/el/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/evatt-labs/el/graph/badge.svg)](https://codecov.io/gh/evatt-labs/el)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/evatt-labs/el/badge)](https://securityscorecards.dev/viewer/?uri=github.com/evatt-labs/el)
 
 Ephemeral full-stack preview environments on Cloudflare Workers and Neon.
 Give it a name, or let it generate one (`blue-honey-badger-12345` style).

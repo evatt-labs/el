@@ -21,7 +21,8 @@
     "provenance": true
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [
     "cloudflare-workers",
@@ -35,8 +36,8 @@
     "type": "git",
     "url": "git+https://github.com/evatt-labs/el.git"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.10",
     "vitest": "^4.1.10"
   }
 }

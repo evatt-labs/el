@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Every action in this repo is pinned to a commit SHA (see AGENTS.md /
+  # the workflow comments for why), which means none of them ever move on
+  # their own. This is what keeps those pins from going stale.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
