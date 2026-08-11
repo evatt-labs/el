@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/evatt-labs/el/compare/v0.2.0...v0.3.0) (2026-08-11)
+
+
+### Features
+
+* sign release artifacts and add a security policy ([#6](https://github.com/evatt-labs/el/issues/6)) ([5b2e34f](https://github.com/evatt-labs/el/commit/5b2e34fc7f529e2faed7c61e6f536c11841ade96))
+
 ## [0.2.0](https://github.com/evatt-labs/el/compare/v0.1.1...v0.2.0) (2026-08-11)
 
 
