@@ -1,15 +1,9 @@
 import path from "node:path";
 import { requireEnv } from "./env.mjs";
 import { generateEnvironmentName, isValidEnvironmentName, resourceName } from "./names.mjs";
-import {
-  findProjectByName,
-  findDefaultBranch,
-  createBranch,
-  getConnectionUri,
-} from "./neon.mjs";
+import { resolveProvider, normalizeProviderResult } from "./providers/index.mjs";
 import {
   getWorkersSubdomain,
-  createHyperdriveConfig,
   createD1Database,
   createKvNamespace,
   createR2Bucket,
@@ -23,8 +17,6 @@ import {
   buildR2BucketsOverride,
   buildQueuesOverride,
 } from "./deploy-config.mjs";
-import { waitForConnectable, assertNoBypassRls, runSql, quoteLiteral } from "./postgres.mjs";
-import { parseConnectionUri } from "./connection-uri.mjs";
 import { waitForReachable } from "./reachability.mjs";
 import { openUrl } from "./browser.mjs";
 
@@ -97,36 +89,26 @@ export async function up(config, requestedName) {
   }
   const name = requestedName ?? generateEnvironmentName();
 
-  const { NEON_API_KEY, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = requireEnv(
-    "NEON_API_KEY",
+  // A `database` block is optional. With none, el is D1-only: no database
+  // provider means no extra required env var, and providerResult keeps its
+  // no-op defaults for the rest of this run (empty bindings, no seed
+  // helpers, no summary line).
+  let provider;
+  let providerOptions;
+  if (config.database) {
+    const { provider: providerRef, ...options } = config.database;
+    provider = resolveProvider(providerRef);
+    providerOptions = options;
+  }
+
+  const env = requireEnv(
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
+    ...(provider?.requiredEnv ?? []),
   );
+  const { CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = env;
 
   console.log(`\n== Provisioning "${name}" ==\n`);
-
-  console.log("-> Locating Neon project and default branch...");
-  const project = await findProjectByName(NEON_API_KEY, config.neon.project);
-  const parentBranch = await findDefaultBranch(NEON_API_KEY, project.id);
-
-  console.log(`-> Branching "${parentBranch.name}" -> "${name}" (copy-on-write, includes schema + roles)...`);
-  const branch = await createBranch(NEON_API_KEY, project.id, parentBranch.id, name);
-
-  console.log("-> Waiting for the new branch's compute to accept connections...");
-  const ownerUri = await getConnectionUri(NEON_API_KEY, project.id, {
-    branchId: branch.id,
-    database: config.neon.database,
-    role: "neondb_owner",
-  });
-  await waitForConnectable(ownerUri);
-
-  const appUri = await getConnectionUri(NEON_API_KEY, project.id, {
-    branchId: branch.id,
-    database: config.neon.database,
-    role: config.neon.appRole,
-  });
-  console.log(`-> Verifying "${config.neon.appRole}" did not inherit BYPASSRLS...`);
-  assertNoBypassRls(appUri, config.neon.appRole);
 
   console.log("-> Resolving the account's workers.dev subdomain...");
   const subdomain = await getWorkersSubdomain(CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID);
@@ -135,17 +117,27 @@ export async function up(config, requestedName) {
     urls[service.key] = `https://${name}-${service.key}.${subdomain}.workers.dev`;
   }
 
-  const appConnection = parseConnectionUri(appUri);
-  const hyperdriveIds = {};
-  for (const service of config.services) {
-    if (!service.hyperdrive) continue;
-    console.log(`-> Creating Hyperdrive config for "${service.key}"...`);
-    hyperdriveIds[service.key] = await createHyperdriveConfig(
-      CLOUDFLARE_API_TOKEN,
-      CLOUDFLARE_ACCOUNT_ID,
-      `${name}-${service.key}-hyperdrive`,
-      appConnection,
-    );
+  // Provider provisioning (Neon's branch fork + Hyperdrive, when configured)
+  // happens before configure(), matching the ordering the Neon-only version
+  // of this tool always had: the database exists, and its connection is
+  // known, before configure() or any service deploy runs.
+  //
+  // normalizeProviderResult always returns a callable bindings(), an
+  // object seed, and an array summary, whatever a configured provider did
+  // or didn't return from up(): everything downstream can use
+  // providerResult unconditionally. With no provider configured at all,
+  // these no-op defaults (no bindings, no seed helpers, no summary line)
+  // are exactly what D1-only needs.
+  let providerResult = { bindings: () => ({}), seed: {}, summary: [] };
+  if (provider) {
+    const result = await provider.up({
+      name,
+      options: providerOptions,
+      services: config.services,
+      env,
+      log: console.log,
+    });
+    providerResult = normalizeProviderResult(result, provider);
   }
 
   let vars = {};
@@ -171,9 +163,7 @@ export async function up(config, requestedName) {
     const deployConfig = buildDeployConfig(baseConfig, {
       name: workerName,
       vars: vars[service.key] ?? {},
-      hyperdrive: service.hyperdrive
-        ? [{ binding: service.hyperdrive.binding, id: hyperdriveIds[service.key] }]
-        : undefined,
+      hyperdrive: providerResult.bindings(service).hyperdrive,
       unsafeInheritBindings: service.unsafeInheritBindings ?? false,
       overrides: resourceOverrides,
     });
@@ -195,16 +185,22 @@ export async function up(config, requestedName) {
   console.log("-> Waiting for deployed Workers to become reachable...");
   await Promise.all(Object.values(urls).map((url) => waitForReachable(url)));
 
+  // Without a database provider, seed() gets no Postgres helpers: there is
+  // no owner connection to hand it. A consumer whose seed() destructures
+  // ownerConnectionString/runSql/quoteLiteral without a provider configured
+  // gets `undefined` for each, same as any other missing object property.
+  //
+  // providerResult.seed is spread first, name/urls second, so el's own
+  // keys always win: a provider whose seed object happened to use `name`
+  // or `urls` as a field can't shadow the environment name or its URLs.
   let seedResult = {};
   if (config.seed) {
     console.log("-> Running seed() hook...");
     seedResult =
       (await config.seed({
+        ...providerResult.seed,
         name,
         urls,
-        ownerConnectionString: ownerUri,
-        runSql: (sql) => runSql(ownerUri, sql),
-        quoteLiteral,
       })) ?? {};
   }
 
@@ -215,10 +211,10 @@ export async function up(config, requestedName) {
 
   const lines = [`\n== "${name}" is live ==\n`];
   for (const [key, url] of Object.entries(urls)) lines.push(`  ${key}: ${url}`);
-  lines.push(`  branch: ${branch.name} (Neon)`);
+  for (const line of providerResult.summary) lines.push(`  ${line}`);
   for (const [label, value] of Object.entries(seedResult)) lines.push(`  ${label}: ${value}`);
   lines.push(`\nTear it down:\n\n  el down ${name}\n`);
   console.log(lines.join("\n"));
 
-  return { name, urls, branch };
+  return { name, urls };
 }
