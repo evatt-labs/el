@@ -1,0 +1,23 @@
+# golangci-lint v2 config for the Go rewrite (docs/BLUEPRINT.md D20/D21).
+# `standard` is golangci-lint's own default set (govet, errcheck, staticcheck,
+# unused, ineffassign, and a handful more) — a deliberately small addition on
+# top of it for now; revisit as internal/ fills in and real patterns emerge
+# (see docs/BLUEPRINT.md D21: coverage-as-a-number isn't the goal, meaningful
+# checks are — same principle applies to lint scope creep).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - gocritic
+    - gosec
+    - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

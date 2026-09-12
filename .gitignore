@@ -5,3 +5,11 @@ coverage/
 !.env.example
 .kraai-deploy-*.json
 .DS_Store
+
+# Go rewrite
+/dist/
+*.test
+/coverage.out
+
+# npm/ postinstall-downloaded binary (see npm/scripts/postinstall.js)
+npm/.bin/

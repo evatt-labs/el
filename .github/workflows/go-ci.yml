@@ -1,0 +1,66 @@
+name: Go CI
+
+# No path filter, deliberately (see docs/BLUEPRINT.md's go-module-scaffold
+# workstream notes on required-status-check gotchas): this workflow's own
+# jobs (go-build-test, go-lint) aren't in branch protection's required-check
+# list today, so a path filter wouldn't collide with the existing
+# JS-era `test`/`analyze`/`dependency-review` checks. But `go build`/`go vet`
+# against a module this small finish in seconds, so there's no real cost to
+# running on every PR — and running unconditionally means these checks can
+# never end up silently skipped (and therefore stuck pending) on a PR whose
+# diff happens not to touch Go files. Revisit only if this workflow grows
+# expensive enough that the tradeoff flips.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Same reasoning as ci.yml: plain pull_request (never pull_request_target),
+# so no secrets are needed or exposed for fork PRs.
+permissions:
+  contents: read
+
+jobs:
+  go-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # No tests exist yet (see go-module-scaffold's PR description) — this
+      # still produces a (currently empty) coverage.out so the codecov
+      # upload step and integration are proven working now, per
+      # docs/BLUEPRINT.md D21, rather than bolted on once tests exist.
+      - run: go test ./... -coverprofile=coverage.out
+
+      # Same codecov project as the JS line (see ci.yml) — tokenless,
+      # subject to Codecov's public rate limit, same tradeoff already
+      # accepted there.
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: coverage.out
+          flags: go
+          fail_ci_if_error: false
+
+  go-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
