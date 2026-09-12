@@ -184,18 +184,21 @@ workstreams:
     title: plan / apply / destroy verbs, protected environments
     status: proposed
     depends: [ensure-semantics]
-    decisions: [D6, D7, D11, D19]
+    decisions: [D6, D7, D11, D19, D20]
     scope:
       - >-
         `plan` diffs manifest vs state; exit codes 0/2/1; never locks.
       - >-
-        `apply` = lock, plan, prompt if `protected`, ensure, write state per
-        step, unlock. `--auto-approve`.
+        `apply` = lock, plan, ensure, write state per step, unlock.
       - >-
         `destroy` = lock, reverse-order delete of managed, leave external
-        untouched; `protected` needs typed name or `--confirm-name`, never
-        `--auto-approve`. `apply` on protected needs `--protected-ok`
-        alongside `--auto-approve`.
+        untouched.
+      - >-
+        `protected` (D20): both `apply` and `destroy` require the
+        environment name — typed at an interactive prompt, or
+        `--confirm-name <name>` non-interactively, exact match, no
+        approve/force bypass. Accepted-and-ignored on a non-protected
+        environment so a workflow can pass it unconditionally.
       - >-
         `--env` selects the overlay; state is keyed by the resolved name
         (`from-pull-request` re-derived per command).
@@ -261,11 +264,20 @@ workstreams:
     title: GitHub Action moves to apply with remote state
     status: proposed
     depends: [state-backend-s3compat]
-    decisions: [D12]
+    decisions: [D12, D20]
     scope:
       - >-
-        Action runs `kraai apply --env preview --auto-approve`; close runs
-        `kraai destroy --env preview --auto-approve`.
+        Action runs `kraai apply --env preview`; close runs
+        `kraai destroy --env preview`. Preview overlays are always
+        `kind: ephemeral`, which rejects `protected` at validation, so
+        the Action's own PR-preview flow never needs a confirmation flag.
+      - >-
+        Action gains a `confirm-name` input, passed through verbatim as
+        `--confirm-name`, for workflows that call `kraai apply`/
+        `kraai destroy` directly against a protected persistent
+        environment — e.g. a `workflow_dispatch` job with a required
+        text input, optionally paired with a GitHub Environment that has
+        required reviewers on that job.
       - >-
         Remove the README paragraph admitting down-then-up has no lockfile
         across pushes.

@@ -41,6 +41,7 @@ further primitive, provider, or extension author an additive module.
 | D17 | Per-resource schemas are generated from each provider's own machine-readable source, never hand-transcribed: wrangler's config JSON Schema and Cloudflare's per-product OpenAPI for `cloudflare`; CloudFormation resource provider schemas (the Cloud Control API surface) for `aws`; `azure-rest-api-specs` OpenAPI for `azure`; Discovery Documents for `gcp`. Every generated schema also accepts `raw:`, merged verbatim into the underlying create/update call, so a field is always representable even before `kraai` gives it a native name. | The ask is Terraform-grade coverage of every option a provider exposes. Hand-authoring that per resource drifts the moment the provider ships a field; generating it from the same source Terraform/Bicep/Cloud Control already use is the only way to keep up, and every major cloud publishes one (verified 2026-09-12: AWS CloudFormation registry schemas + Cloud Control API, Azure's OpenAPI specs feeding Bicep's type system, GCP Discovery Documents feeding `magic-modules`). |
 | D18 | One extension surface for the whole tool, not a separate bespoke registry per layer: a plugin is a module (npm package or local file) declared in `plugins:` that can register providers (D16), resource types (D15), state backends (D5), and middleware, in any combination. Built-ins (the `cloudflare` provider and its resource types, the `s3-compatible` and `local` state backends) are themselves plugin modules, loaded before the project's own `plugins:` list. A later registration for the same key overrides an earlier one; overriding a built-in logs a warning and never fails. | "Pluggable, extendable, overridable" was asked for as a property of the whole tool, not the database layer alone (0.4.0's provider registry) or the cloud layer alone (D16). One registry, one override rule, one entry path — a third-party plugin and an Evatt Labs built-in go through the identical mechanism. |
 | D19 | Lifecycle hooks expand beyond `configure`/`seed`/`open` (which keep their existing, narrower contracts) to named pre/post hooks around every verb and every per-resource operation: `preValidate`, `postValidate`, `prePlan`, `postPlan`, `preApply`, `postApply`, `preResourceApply`, `postResourceApply`, `preDestroy`, `postDestroy`, `preResourceDestroy`, `postResourceDestroy`, `onError`. All optional. Middleware (D18) wraps the same seams for reusable, installable, cross-project concerns; hooks stay this-project-specific. | Full lifecycle coverage was asked for explicitly. Keeping `configure`/`seed`/`open` as their own ergonomic, specific-contract hooks — rather than folding them into generic pre/post pairs — means the common case stays as easy as it is today. |
+| D20 | Protected-environment confirmation is one low-level primitive: `--confirm-name <name>`, exact match, no bypass flag, accepted identically whether it came from a human typing at a prompt or from a CI's own input/approval mechanism. `kraai` never re-implements branch protection, required reviewers, or manual-approval UX. | CI-driven applies and destroys need to compose with GitHub Actions' own gating (`workflow_dispatch` inputs, environment required reviewers) rather than layer a second approval system on top. One flag, matched deterministically, is the only thing that has to compose — and it collapses `apply`'s and `destroy`'s previously different flag schemes into the same rule. |
 
 ## Manifest schema
 
@@ -301,8 +302,8 @@ live binding, var, and secret the manifest doesn't declare. Instead:
 | Command | Does |
 |---------|------|
 | `kraai plan --env <name>` | Load base + overlay, load state, print create / update / detach / delete per resource. Exit 0 on no changes, 2 on changes, 1 on error. No mutation, no lock. |
-| `kraai apply --env <name>` | Acquire lock, run plan, apply it, write state after every mutation (as `up` does today), release lock. `--auto-approve` for CI. |
-| `kraai destroy --env <name>` | Acquire lock, delete `managed: kraai` resources in reverse order, leave `external` untouched, delete state only when no warnings. |
+| `kraai apply --env <name>` | Acquire lock, run plan, apply it (name confirmation if `protected`, see below), write state after every mutation (as `up` does today), release lock. |
+| `kraai destroy --env <name>` | Acquire lock, delete `managed: kraai` resources in reverse order, leave `external` untouched, delete state only when no warnings (name confirmation if `protected`, see below). |
 | `kraai gc` | List ephemeral environments in the state bucket whose `ttl` has elapsed; destroy each. `--dry-run` lists only. |
 | `kraai state list \| show <name>` | Read-only views of the backend. |
 | `kraai up` / `kraai down` | Aliases for `apply` / `destroy` on an ephemeral overlay, removed one minor after `apply` ships. |
@@ -316,13 +317,30 @@ resolved name.
 
 ### `protected`
 
-`protected: true` is not decoration; it survives CI flags.
+`protected: true` gates mutation behind a name confirmation, and that
+confirmation is deliberately the only gate `kraai` itself implements.
+Everything else — who may trigger the run, whether a reviewer must
+approve first, which branch it may run from — is left to whatever runs
+`kraai`. This is one low-level primitive precisely so a CI's own
+approval mechanism can drive it, instead of `kraai` reimplementing
+GitHub's (or anyone else's) approval UX (D20). `apply` and `destroy`
+follow the identical rule:
 
-- `apply`: interactive prompt. `--auto-approve` is accepted only together
-  with `--protected-ok`; either alone exits 1 with a message.
-- `destroy`: never accepts `--auto-approve`. Interactive runs must type
-  the environment name; non-interactive runs must pass
-  `--confirm-name <name>` and it must match exactly.
+- Interactive terminal: prompt for the environment name; a mismatch or
+  empty input aborts before any mutation.
+- Non-interactive, or `--confirm-name` passed explicitly: the name must
+  match the resolved environment exactly, or the command exits 1 before
+  acquiring the lock. There is no separate approve/force flag — the name
+  is the only key, for both verbs.
+- `--confirm-name` on a non-protected environment is accepted and
+  ignored, not an error, so a workflow can pass it unconditionally
+  without branching on whether its target happens to be protected.
+- The GitHub Action exposes a `confirm-name` input mapped straight to
+  `--confirm-name`. The intended pattern is a `workflow_dispatch` job
+  with a required text input, optionally paired with a GitHub Environment
+  that has required reviewers on that job — both entirely outside
+  `kraai`'s awareness. `kraai` only ever sees a string it matches or
+  doesn't.
 
 Ensure semantics per resource type (find-or-create by name, adopt by id):
 
@@ -471,8 +489,12 @@ exactly as a 0.5.0 hooks file does. `environment` is
    `s3-compatible` (works against R2, MinIO, AWS S3, B2, ...), always
    authenticated with dedicated storage credentials, never a Cloudflare
    API token.
-3. `protected` prompts on `apply`, not only `destroy`, and `destroy` on a
-   protected env never takes `--auto-approve`. Confirm.
+3. ~~`protected` prompts on `apply`, not only `destroy`.~~ **Resolved
+   2026-09-12:** yes, and simplified further — `apply` and `destroy` on a
+   protected environment use the identical `--confirm-name <name>` rule
+   (D20), so CI's own gating (GitHub Environment required reviewers,
+   `workflow_dispatch` inputs) can drive it without `kraai` knowing
+   anything about approval flows.
 4. Worker adoption refuses on undeclared live bindings unless
    `--allow-binding-drop`. Alternative: adopt copies undeclared bindings
    into state as `external` automatically. Proposed: refuse; explicit
