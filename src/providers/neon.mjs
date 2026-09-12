@@ -6,6 +6,7 @@
 
 import {
   findProjectByName,
+  findOrganizations,
   findDefaultBranch,
   createBranch,
   findBranchByName,
@@ -40,6 +41,36 @@ export function validate(options) {
         `connects as), got ${JSON.stringify(options?.appRole)}`,
     );
   }
+  if (options?.orgId !== undefined && (typeof options.orgId !== "string" || options.orgId === "")) {
+    fail("orgId must be a non-empty string if given");
+  }
+}
+
+/**
+ * Every Neon account belongs to at least one organization, and listing
+ * projects by name (findProjectByName in ../neon.mjs) requires an org_id.
+ * `organizations` is whatever findOrganizations(apiKey) returned, passed
+ * in rather than fetched here so this decision (which org to use, or
+ * whether to give up and ask) is plain data-in-data-out and testable
+ * without a network call.
+ *
+ * An explicit `options.orgId` always wins over this and skips the account
+ * lookup entirely: the caller only reaches this function when no explicit
+ * orgId was given.
+ */
+export function resolveOrgId(organizations) {
+  if (organizations.length === 1) return organizations[0].id;
+  if (organizations.length === 0) {
+    throw new Error(
+      "This Neon API key's account belongs to no organizations. Neon accounts created after " +
+        "the organization migration always have at least one; check the key is valid.",
+    );
+  }
+  const listed = organizations.map((org) => `${org.name} (${org.id})`).join(", ");
+  throw new Error(
+    `This Neon API key's account belongs to more than one organization (${listed}). ` +
+      "Set orgId in your database config to pick one.",
+  );
 }
 
 /**
@@ -56,8 +87,10 @@ export function bindingsFor(service, hyperdriveIds) {
 export async function up({ name: environmentName, options, services, env, log }) {
   const { NEON_API_KEY, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = env;
 
+  const orgId = options.orgId ?? resolveOrgId(await findOrganizations(NEON_API_KEY));
+
   log("-> Locating Neon project and default branch...");
-  const project = await findProjectByName(NEON_API_KEY, options.project);
+  const project = await findProjectByName(NEON_API_KEY, options.project, orgId);
   const parentBranch = await findDefaultBranch(NEON_API_KEY, project.id);
 
   log(`-> Branching "${parentBranch.name}" -> "${environmentName}" (copy-on-write, includes schema + roles)...`);
@@ -121,7 +154,8 @@ export async function down({ name: environmentName, options, services, env, log 
 
   log("-> Deleting Neon branch...");
   await tryDelete(`Neon branch "${environmentName}"`, async () => {
-    const project = await findProjectByName(NEON_API_KEY, options.project);
+    const orgId = options.orgId ?? resolveOrgId(await findOrganizations(NEON_API_KEY));
+    const project = await findProjectByName(NEON_API_KEY, options.project, orgId);
     const branch = await findBranchByName(NEON_API_KEY, project.id, environmentName);
     if (!branch) {
       console.warn(`  (no Neon branch named "${environmentName}" found, skipping)`);
