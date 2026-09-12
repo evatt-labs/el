@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/evatt-labs/el/compare/v0.4.1...v0.4.2) (2026-09-12)
+
+
+### Bug Fixes
+
+* resolve a Neon organization when listing projects by name ([#29](https://github.com/evatt-labs/el/issues/29)) ([a86a159](https://github.com/evatt-labs/el/commit/a86a159e86b85ff18da726734a11d3a9829a4c20))
+
 ## [0.4.1](https://github.com/evatt-labs/el/compare/v0.4.0...v0.4.1) (2026-09-12)
 
 
