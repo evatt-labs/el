@@ -1,6 +1,6 @@
 {
   "name": "kraai",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Ephemeral full-stack preview environments on Cloudflare Workers, D1 by default, Neon via a pluggable database provider. Spin up a named, disposable environment and tear it down on command.",
   "license": "MIT",
   "type": "module",
