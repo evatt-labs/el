@@ -13,8 +13,10 @@ in YAML and applied with one command. Today `kraai` does the ephemeral
 half from a JS config. This blueprint turns it into the whole thing.
 
 End state: every Cloudflare hosting primitive is expressible inside an
-environment. This cycle ships the six that exist today plus the machinery
-(D15) that makes each further one an additive module.
+environment, and the same manifest grammar later spans AWS, Azure, and
+GCP, each a bring-your-own account. This cycle ships the six Cloudflare
+primitives that exist today plus the machinery (D15, D16) that makes each
+further primitive or provider an additive module.
 
 ## Decisions, one line each
 
@@ -34,7 +36,8 @@ environment. This cycle ships the six that exist today plus the machinery
 | D12 | The Action moves to `kraai apply --env preview` with remote state. | Closes the README's admitted gap: down-then-up across pushes has no lockfile today. |
 | D13 | Containers come after persistent semantics, as their own workstream. | Agreed earlier; nothing here blocks them, and adding them first would double the surface under change. |
 | D14 | `NAME_PATTERN`, the `-pull-request-` infix, and `resourceName()` output are frozen for ephemeral environments. | Changing them orphans every environment already deployed by 0.4.x and 0.5.x. |
-| D15 | The resource model is open-ended by construction: one `ensure()` module plus one schema block per Cloudflare primitive, registered in a table that `plan`/`apply`/`destroy` iterate. Adding a primitive never touches the verbs. | The end state is every Cloudflare hosting feature inside an environment (Vectorize, Workflows, AI Gateway, Images, Stream, Email Routing, Access, zones). A fixed enum would be rewritten at each one. |
+| D15 | The resource model is open-ended by construction: one `ensure()` module plus one schema block per primitive, registered in a table keyed `provider/type` that `plan`/`apply`/`destroy` iterate. Adding a primitive never touches the verbs. | The end state is every Cloudflare hosting feature inside an environment (Vectorize, Workflows, AI Gateway, Images, Stream, Email Routing, Access, zones). A fixed enum would be rewritten at each one. |
+| D16 | Every service carries `provider:`, default `cloudflare`, omitted in every example today. State records `provider` on every resource. Credentials and the state backend are resolved per provider. | AWS, Azure, and GCP follow, BYO account for each. A service belongs to one cloud; resource type names (`d1`, `sqs`) already namespace themselves, so the key is the only schema cost, and it must exist before the first manifest is written by a user. |
 
 ## Manifest schema
 
@@ -64,7 +67,12 @@ services:
 
 `services` becomes a map keyed by service key (the key was already unique
 and already validated by `/^[a-z][a-z0-9-]*$/`). Everything under a
-service keeps the 0.5.0 shape and validation.
+service keeps the 0.5.0 shape and validation. `provider` (D16) is
+accepted on every service; the only valid value this cycle is
+`cloudflare`, and any other value rejects with "provider X is not
+supported in kraai <version>". Which resource keys a service may declare
+is decided by its provider's registry entries, so `d1` under
+`provider: aws` is an unknown key.
 
 ### `environments/<name>.yaml` (overlay, one per environment)
 
@@ -146,6 +154,7 @@ One state document per environment, JSON, schema-versioned.
   "updatedAt": "2026-09-12T00:00:00Z",
   "services": {
     "api": {
+      "provider": "cloudflare",
       "worker": { "name": "acme-api", "managed": "kraai" },
       "d1": { "DB": { "id": "...", "name": "...", "managed": "external" } },
       "kv": { "CACHE": { "id": "...", "managed": "kraai" } }
@@ -190,6 +199,9 @@ kraai-state (R2 bucket, created on first apply if absent)
   the test suite; an environment declares its backend in the overlay:
   `state: { backend: r2 | local }`, default `r2` for persistent and for
   the Action, `local` otherwise.
+- The backend interface is provider-neutral. An AWS provider later adds
+  `s3` on the same SigV4 code path; the state document shape does not
+  change per provider.
 
 ### Ownership invariant
 
@@ -310,7 +322,7 @@ Existing hooks that ignore the new argument keep working.
 - Terraform as an engine, or Terraform state import.
 - Drift refresh against live APIs.
 - Cross-service queue wiring (unchanged limitation).
-- AWS.
+- AWS, Azure, GCP providers. D16 reserves the key; nothing else lands.
 - Container-to-container networking (Cloudflare Containers are HTTP-only
   through a Worker; the containers workstream inherits that).
 

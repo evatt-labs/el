@@ -12,7 +12,7 @@ workstreams:
     title: YAML manifest loader and schema
     status: proposed
     depends: []
-    decisions: [D1, D2, D10, D14]
+    decisions: [D1, D2, D10, D14, D16]
     scope:
       - >-
         Add `yaml` as the single runtime dependency, pinned exact; document
@@ -27,6 +27,10 @@ workstreams:
         `services` becomes a map; the existing per-service validation moves
         over unchanged.
       - >-
+        `services.<key>.provider`, default `cloudflare`; any other value
+        rejects with an unsupported-provider message. Resource keys allowed
+        under a service come from that provider only.
+      - >-
         Keep `kraai.config.mjs` loading working; both formats resolve to the
         same internal config object that `up`/`down` consume today.
     acceptance:
@@ -35,6 +39,9 @@ workstreams:
         "Validation rules" has a failing test.
       - >-
         An overlay that adds a service key not in the base is rejected.
+      - >-
+        `provider: aws` rejects; `provider: cloudflare` and omitted are
+        equivalent in the resolved config.
       - >-
         `npm test` green; no change to ephemeral naming output (existing
         names tests untouched and passing).
@@ -66,14 +73,14 @@ workstreams:
     title: State document v2 on the local backend, ownership invariant
     status: proposed
     depends: [naming-policy]
-    decisions: [D3, D4]
+    decisions: [D3, D4, D16]
     scope:
       - >-
         `src/state/` with a backend interface `{ read, write(ifVersion), lock, unlock, list }`
         and a `local` implementation over `.kraai/<name>.state.json`.
       - >-
         v1 lockfile read + in-place upgrade to v2 (`managed: kraai` on every
-        resource).
+        resource, `provider: cloudflare` on every service).
       - >-
         Every resource record carries `managed`; `down` refuses to delete
         anything not in state or marked `external`.
@@ -265,7 +272,7 @@ workstreams:
     smoke: true
 
   - id: aws
-    title: AWS provider surface
+    title: AWS provider surface (then Azure, GCP; BYO account each)
     status: proposed
     depends: [containers]
     decisions: []
