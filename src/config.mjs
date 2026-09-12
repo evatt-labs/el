@@ -1,9 +1,9 @@
-// Loads and validates el.config.mjs from the current working directory.
+// Loads and validates kraai.config.mjs from the current working directory.
 //
-// The config contract is deliberately narrow: el knows how to deploy named
+// The config contract is deliberately narrow: kraai knows how to deploy named
 // Cloudflare Workers, provision per-service D1/KV/R2/Queues resources, and,
 // if a `database` provider is configured, provision that database ahead of
-// the deploy. With no `database` block, el is D1-only: no database
+// the deploy. With no `database` block, kraai is D1-only: no database
 // credentials, no Hyperdrive. It knows nothing about your application:
 // auth schemes, JWT signing, seed data, and which URLs are worth opening in
 // a browser are all yours to supply via hooks.
@@ -14,14 +14,14 @@ import { pathToFileURL } from "node:url";
 import { resolveProvider } from "./providers/index.mjs";
 
 function fail(message) {
-  throw new Error(`Invalid el.config.mjs: ${message}`);
+  throw new Error(`Invalid kraai.config.mjs: ${message}`);
 }
 
 export async function loadConfig() {
-  const configPath = path.join(process.cwd(), "el.config.mjs");
+  const configPath = path.join(process.cwd(), "kraai.config.mjs");
   if (!existsSync(configPath)) {
     throw new Error(
-      "No el.config.mjs found in the current directory. See the README for the config shape.",
+      "No kraai.config.mjs found in the current directory. See the README for the config shape.",
     );
   }
   // Checked existence first specifically so an import error INSIDE a config
@@ -83,7 +83,7 @@ export function validate(config) {
     if (service.hyperdrive && database === undefined) {
       fail(
         `service "${service.key}": hyperdrive requires a database provider, add a top-level ` +
-          `"database" block to el.config.mjs`,
+          `"database" block to kraai.config.mjs`,
       );
     }
     if (

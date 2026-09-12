@@ -1,24 +1,28 @@
-# el
+# kraai
 
-[![CI](https://github.com/evatt-labs/el/actions/workflows/ci.yml/badge.svg)](https://github.com/evatt-labs/el/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/evatt-labs/el/graph/badge.svg)](https://codecov.io/gh/evatt-labs/el)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/evatt-labs/el/badge)](https://securityscorecards.dev/viewer/?uri=github.com/evatt-labs/el)
+[![CI](https://github.com/evatt-labs/kraai/actions/workflows/ci.yml/badge.svg)](https://github.com/evatt-labs/kraai/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/evatt-labs/kraai/graph/badge.svg)](https://codecov.io/gh/evatt-labs/kraai)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/evatt-labs/kraai/badge)](https://securityscorecards.dev/viewer/?uri=github.com/evatt-labs/kraai)
 
-Ephemeral full-stack preview environments on Cloudflare Workers. Give it a
-name, or let it generate one (`blue-honey-badger-12345` style). It
-provisions the D1 databases, KV namespaces, R2 buckets, and queues your
-services declare, deploys your Cloudflare Workers under that name, and
-wires them together. Tear it down with the same name.
+**Renamed from `el`.** This package was previously published as
+`@evatt-labs/el`; the config file, state directory, and bin name changed
+accordingly. `@evatt-labs/el` is deprecated on npm and points here.
+
+`kraai` gives you ephemeral full-stack preview environments on Cloudflare
+Workers. Give it a name, or let it generate one (`blue-honey-badger-12345`
+style). It provisions the D1 databases, KV namespaces, R2 buckets, and
+queues your services declare, deploys your Cloudflare Workers under that
+name, and wires them together. Tear it down with the same name.
 
 D1 is the default and needs nothing beyond a Cloudflare account. If your
 services also need Postgres, configure a database provider (Neon is the
-only one built in) and `el` forks a branch and provisions Hyperdrive
+only one built in) and `kraai` forks a branch and provisions Hyperdrive
 before deploying. See [Database providers](#database-providers).
 
 ```sh
-npx @evatt-labs/el up                         # generates a name
-npx @evatt-labs/el up blue-honey-badger-12345  # or pick one
-npx @evatt-labs/el down blue-honey-badger-12345
+npx kraai up                            # generates a name
+npx kraai up blue-honey-badger-12345    # or pick one
+npx kraai down blue-honey-badger-12345
 ```
 
 ## What it actually does
@@ -45,7 +49,7 @@ npx @evatt-labs/el down blue-honey-badger-12345
 4. Runs your `seed()` hook, if you have one.
 5. Opens whatever URLs your `open()` hook returns in your browser.
 
-`el` knows about Cloudflare Workers, D1, KV, R2, and Queues by default,
+`kraai` knows about Cloudflare Workers, D1, KV, R2, and Queues by default,
 plus whatever a configured database provider adds (Neon, plus Hyperdrive
 for the services that need it). It knows nothing about your application:
 auth, seed data, and which URLs are worth a look are up to the hooks you
@@ -56,33 +60,33 @@ provide.
 ### Prerequisites
 
 - Node.js, and `wrangler` installed as a devDependency of the service
-  (or workspace root) it deploys. `el` does not fall back to
+  (or workspace root) it deploys. `kraai` does not fall back to
   `npx wrangler` when no local install is found. In a directory with
   nothing installed, `npx` downloads and runs the latest unpinned,
   unverified `wrangler` in a process already holding your Cloudflare
   credentials, and your database provider's if you have one configured.
-  `el` fails with a clear error instead of doing that.
+  `kraai` fails with a clear error instead of doing that.
 - A Cloudflare account.
 - **Only with the Neon provider:** `psql` on `PATH`, used to verify the
   branch's role (step 1 above); Workers Paid on that Cloudflare account,
   which Hyperdrive requires; and a Neon project that already exists, with
   the role your Workers connect as (`appRole` in your `database` config)
-  already created on its default branch. `el` forks that branch; it
+  already created on its default branch. `kraai` forks that branch; it
   doesn't create the role.
 
 ### Install
 
 ```sh
-npm install -D @evatt-labs/el
+npm install -D kraai
 ```
 
-Run it with `npx el up` / `npx el down`. Every example in this README
-assumes that.
+Run it with `npx kraai up` / `npx kraai down`. Every example in this
+README assumes that.
 
 ### Create a Cloudflare API token
 
-Dashboard > profile icon > API Tokens > Create Token > Custom token. `el`
-calls the Workers Scripts, KV, R2, D1, and Queues APIs directly, and
+Dashboard > profile icon > API Tokens > Create Token > Custom token.
+`kraai` calls the Workers Scripts, KV, R2, D1, and Queues APIs directly, and
 `wrangler` needs its own deploy permissions. Grant all of these, scoped to
 your account:
 
@@ -113,10 +117,10 @@ keys > Create new API key. This is `NEON_API_KEY` below. It's scoped to
 your whole Neon account, not one project: treat it like any credential
 that can create and destroy databases.
 
-Every Neon account belongs to at least one organization. `el` resolves
+Every Neon account belongs to at least one organization. `kraai` resolves
 which one automatically when there's exactly one, which is the common
 case; an account that belongs to more than one needs `orgId` set
-explicitly in the `database` config (see below), or `el up`/`el down`
+explicitly in the `database` config (see below), or `kraai up`/`kraai down`
 fail with an error naming every organization the key can see.
 
 ### Set your environment variables
@@ -132,41 +136,41 @@ CLOUDFLARE_ACCOUNT_ID=...
 NEON_API_KEY=...
 ```
 
-### Write `el.config.mjs`
+### Write `kraai.config.mjs`
 
-See [`el.config.mjs`](#elconfigmjs) for the full reference. At minimum: one
-service pointing at a directory with its own `wrangler.jsonc`. Add a
+See [`kraai.config.mjs`](#kraaiconfigmjs) for the full reference. At minimum:
+one service pointing at a directory with its own `wrangler.jsonc`. Add a
 `database` block only if a service needs Postgres/Hyperdrive.
 
 ### First run
 
 ```sh
-npx el up
+npx kraai up
 ```
 
 Each step in [What it actually does](#what-it-actually-does) logs as it
-runs. On success, `el` prints the deployed URLs and the exact teardown
+runs. On success, `kraai` prints the deployed URLs and the exact teardown
 command:
 
 ```sh
-npx el down blue-honey-badger-12345
+npx kraai down blue-honey-badger-12345
 ```
 
 Teardown is best-effort and safe to call after a partial failure. Rerun
-`el down` with the same name.
+`kraai down` with the same name.
 
 ## GitHub Action
 
-A composite action at the repo root wraps `el up`/`el down` for pull
+A composite action at the repo root wraps `kraai up`/`kraai down` for pull
 requests: one environment per PR, created on open and every push, a sticky
 comment with its URLs, torn down when the PR closes. It runs
-`bin/el.mjs` straight from the action's own checkout, so the `uses:` ref
-pins the exact `el` version; there's no npm install of `el` itself. Your
-workflow still runs `npm ci` first, because `el` refuses to run without a
+`bin/kraai.mjs` straight from the action's own checkout, so the `uses:` ref
+pins the exact `kraai` version; there's no npm install of `kraai` itself. Your
+workflow still runs `npm ci` first, because `kraai` refuses to run without a
 locally installed `wrangler`.
 
 ```yaml
-name: el preview environment
+name: kraai preview environment
 
 on:
   pull_request:
@@ -177,7 +181,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: el-pr-${{ github.event.pull_request.number }}
+  group: kraai-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -186,7 +190,7 @@ jobs:
     steps:
       # Checks out the PR's head SHA, not the default merge ref. On
       # `closed` after a merge, the merge ref can already be gone, and
-      # `el down` still needs el.config.mjs to know what to tear down.
+      # `kraai down` still needs kraai.config.mjs to know what to tear down.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -197,9 +201,9 @@ jobs:
 
       - run: npm ci
 
-      # el's own convention is SHA-pinning (see .github/workflows/ci.yml);
+      # kraai's own convention is SHA-pinning (see .github/workflows/ci.yml);
       # the SHA for this tag lands once the release is cut.
-      - uses: evatt-labs/el@v0.5.0
+      - uses: evatt-labs/kraai@v0.5.0
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -212,8 +216,8 @@ jobs:
 | Input               | Default              | Meaning |
 | -------------------- | -------------------- | ------- |
 | `mode`               | `auto`                | `auto` resolves to `down` when the event's action is `closed`, otherwise `up`. Set `up`/`down` to force one. |
-| `name`               | (derived)             | Explicit environment name. Overrides the one derived from the repo name and PR number. Must match el's name grammar. |
-| `working-directory`  | `.`                   | Directory containing `el.config.mjs`. |
+| `name`               | (derived)             | Explicit environment name. Overrides the one derived from the repo name and PR number. Must match kraai's name grammar. |
+| `working-directory`  | `.`                   | Directory containing `kraai.config.mjs`. |
 | `comment`            | `true`                | Whether to post or update the sticky PR comment. |
 | `github-token`       | `${{ github.token }}` | Token used only for the comment. |
 
@@ -222,12 +226,12 @@ jobs:
 | Output | Meaning |
 | ------ | ------- |
 | `name` | The environment name used for this run. |
-| `urls` | The JSON object `el up --output` wrote (`name`, `urls`, `summary`, `seed`), as a string. Only set in up mode. |
+| `urls` | The JSON object `kraai up --output` wrote (`name`, `urls`, `summary`, `seed`), as a string. Only set in up mode. |
 | `mode` | The resolved mode, `up` or `down`. |
 
 ### How re-runs work
 
-Every run does `el down` on the derived name first, then `el up` if the
+Every run does `kraai down` on the derived name first, then `kraai up` if the
 resolved mode is `up`. That's the re-run strategy: a fresh environment on
 every push, not a mutated one. The `down` is noisy on a PR's first push,
 since nothing exists yet to tear down; that's expected, and it doesn't
@@ -240,12 +244,12 @@ run's `down` reaps whatever that cancelled run left behind, using the same
 name it would have used anyway.
 
 The lockfile (see [Never](#never)) only helps here within a single job's
-checkout: `el up` writes it into that job's own working directory, which is
+checkout: `kraai up` writes it into that job's own working directory, which is
 gone by the time the next push's job checks out a fresh copy of the repo,
-so this re-run's `el down` still has no lockfile from the `up` that created
+so this re-run's `kraai down` still has no lockfile from the `up` that created
 the environment it's tearing down. The benefit today is local-machine and
 same-checkout only. Closing this gap for the Action's own re-runs would
-mean persisting `.el/` across jobs, e.g. as a workflow artifact or cache
+mean persisting `.kraai/` across jobs, e.g. as a workflow artifact or cache
 keyed on the environment name; this change doesn't do that.
 
 ### Fork PRs
@@ -274,7 +278,7 @@ See [Trust model](#trust-model) for why the action refuses to run on
 
 ## Trust model
 
-Running `el up`/`el down` in a directory runs `el.config.mjs` from that
+Running `kraai up`/`kraai down` in a directory runs `kraai.config.mjs` from that
 directory as ordinary Node code, with full access to your environment,
 including `CLOUDFLARE_API_TOKEN` and any database provider's credentials
 (`NEON_API_KEY`, with the Neon provider). That's the extension mechanism
@@ -282,9 +286,9 @@ working as intended, the same as `webpack.config.js` or `next.config.js`.
 The risk is what's in scope when it runs: credentials that can create and
 destroy infrastructure.
 
-Never wire `el` into a CI trigger that runs against an untrusted branch,
+Never wire `kraai` into a CI trigger that runs against an untrusted branch,
 such as a `pull_request_target` workflow that checks out a fork's
-`head.sha`. That hands an attacker-controlled `el.config.mjs` your
+`head.sha`. That hands an attacker-controlled `kraai.config.mjs` your
 Cloudflare credentials, and your database provider's, directly. Trigger on
 `push`/`release` to branches you control, or on `pull_request` (forked PRs
 don't receive repository secrets by default).
@@ -292,7 +296,7 @@ don't receive repository secrets by default).
 The [GitHub Action](#github-action) enforces this itself: it refuses to
 run at all on `pull_request_target`.
 
-## `el.config.mjs`
+## `kraai.config.mjs`
 
 Lives in your project root, next to the services it deploys.
 
@@ -303,7 +307,7 @@ export default {
     provider: "neon",       // built-in name, or a provider object
     project: "acme",        // everything but `provider` is the provider's own options
     database: "neondb",
-    appRole: "app_user",    // least-privilege role; el verifies it lacks BYPASSRLS, see Notes
+    appRole: "app_user",    // least-privilege role; kraai verifies it lacks BYPASSRLS, see Notes
   },
 
   services: [
@@ -357,12 +361,12 @@ export default {
 
 Under `services[]`, only `key` and `dir` are required. `hyperdrive`,
 `d1`, `kv`, `r2`, `queues`, and `unsafeInheritBindings` are optional.
-`database` is optional too: omit it and `el` is D1-only. All three hooks
+`database` is optional too: omit it and `kraai` is D1-only. All three hooks
 are optional.
 
 ## Database providers
 
-`database` is optional. Omit it and `el` is D1-only: no `NEON_API_KEY`, no
+`database` is optional. Omit it and `kraai` is D1-only: no `NEON_API_KEY`, no
 `psql`, no Hyperdrive, no Workers Paid requirement. Configure it when a
 service needs Postgres.
 
@@ -403,12 +407,12 @@ A provider object looks like this:
 `requiredEnv` names. Hyperdrive create/delete is a Cloudflare API call
 keyed on a connection string only the provider knows, so a provider that
 wants Hyperdrive needs both. `log` is `console.log`, passed through so a
-provider's own step messages match `el`'s `-> ...` style. `down()` should
+provider's own step messages match `kraai`'s `-> ...` style. `down()` should
 never throw for a resource that's already gone; see `tryDelete` in
 `src/try-delete.mjs` for the pattern the Neon provider uses.
 
 `lock` is optional, on both sides. Whatever `up()` returns for it is written
-into `el`'s own per-environment lockfile and handed back to `down()` on
+into `kraai`'s own per-environment lockfile and handed back to `down()` on
 teardown, so a provider can delete the exact resources it created (by id,
 by exact name, whatever it needs) instead of re-deriving them from
 `options`/`services` at teardown time, which may have changed since `up()`
@@ -422,11 +426,11 @@ name-based lookup it already had.
 An ephemeral environment deploys from an allowlist of your
 `wrangler.jsonc`: `main`, `compatibility_date`, `compatibility_flags`,
 `observability`, `durable_objects`/`migrations`, plus whatever
-`configure()` returns for `vars` and whatever `el` itself provisioned
+`configure()` returns for `vars` and whatever `kraai` itself provisioned
 (Hyperdrive, D1, KV, R2, queues). Nothing else in the file is carried
 forward.
 
-This wasn't always true. The first version of `el` mutated the loaded
+This wasn't always true. The first version of `kraai` mutated the loaded
 config in place, overwriting only `name`/`vars`/`hyperdrive` and leaving
 everything else, including any D1 database, KV namespace, R2 bucket, or
 queue binding, untouched. A disposable preview environment had live
@@ -437,12 +441,12 @@ that.
 Every stateful binding has three ways to be handled, in order of
 preference:
 
-1. **Declare it in `el.config.mjs`** (`d1`/`kv`/`r2`/`queues` on the
-   service). `el` provisions a fresh, environment-scoped resource and
+1. **Declare it in `kraai.config.mjs`** (`d1`/`kv`/`r2`/`queues` on the
+   service). `kraai` provisions a fresh, environment-scoped resource and
    deploys with that instead. This is almost always what you want.
 2. **`unsafeInheritBindings: true`**. Carries the committed binding
    forward verbatim, pointed at whatever it points at in production.
-3. **Neither**. `el` refuses to deploy and tells you which binding
+3. **Neither**. `kraai` refuses to deploy and tells you which binding
    forced the refusal.
 
 `durable_objects` needs none of the above: a DO class lives inside the
@@ -471,36 +475,36 @@ your service doesn't have a `queue()` export yet, leave `consumer` unset
 ### R2 buckets are emptied before deletion
 
 R2 refuses to delete a non-empty bucket. A preview app may have written
-real objects to an ephemeral bucket during testing, so `el down` lists
+real objects to an ephemeral bucket during testing, so `kraai down` lists
 and deletes every object first. Best-effort, same as the rest of
 teardown.
 
 ## Never
 
-`el` never prints a connection string, and no hook should either.
+`kraai` never prints a connection string, and no hook should either.
 `ownerConnectionString` exists so a `seed()` hook can build its own SQL.
 Prefer `runSql`/`quoteLiteral`; treat the raw string as write-only if you
 use it directly.
 
-`.el-deploy-*.json`, the mutated wrangler config `el` writes next to your
-real one during a deploy, never contains secrets (those go over stdin to
-`wrangler secret put`, never through this file). It does contain
+`.kraai-deploy-*.json`, the mutated wrangler config `kraai` writes next to
+your real one during a deploy, never contains secrets (those go over stdin
+to `wrangler secret put`, never through this file). It does contain
 whatever `vars` your `configure()` hook returned. Gitignore
-`.el-deploy-*.json` in any repo this runs in, in case a crash leaves one
+`.kraai-deploy-*.json` in any repo this runs in, in case a crash leaves one
 behind before cleanup runs.
 
-`el up` also writes `.el/<environment-name>.lock.json`, the record of what
-it actually provisioned for that environment (see
+`kraai up` also writes `.kraai/<environment-name>.lock.json`, the record of
+what it actually provisioned for that environment (see
 [Database providers](#database-providers) for what a provider puts in it,
 and `src/lockfile.mjs` for the full shape). It contains resource names and
-ids, never a connection string or secret. Gitignore `.el/` alongside
-`.el-deploy-*.json`. `el down` deletes it once teardown finishes with no
-warnings; if teardown warned about anything, it's left in place so a rerun
-of `el down` has it to work from.
+ids, never a connection string or secret. Gitignore `.kraai/` alongside
+`.kraai-deploy-*.json`. `kraai down` deletes it once teardown finishes with
+no warnings; if teardown warned about anything, it's left in place so a
+rerun of `kraai down` has it to work from.
 
 ## Known limitations
 
-- **`el down <name>` has no ownership check.** Anyone with a valid
+- **`kraai down <name>` has no ownership check.** Anyone with a valid
   `CLOUDFLARE_API_TOKEN` (and, with a database provider configured, its
   credentials too) for the target project can tear down any environment
   matching a valid name. No tagging or provenance tracking yet. Don't give
@@ -508,14 +512,14 @@ of `el down` has it to work from.
   should have, and don't reuse a name a human picked by hand for something
   you want to keep.
 - `open()`'s URLs are validated to be `http:`/`https:` before opening,
-  but `el` cannot audit what a hook itself does with your loaded
+  but `kraai` cannot audit what a hook itself does with your loaded
   environment. See [Trust model](#trust-model).
 - **Queues are per-service, not shared.** A queue produced by one
   service and consumed by a different one in the same environment isn't
   wired automatically, same limitation Hyperdrive has. Declare the
   queue binding on whichever service needs it. Cross-service wiring
   isn't built yet.
-- If your `wrangler.jsonc` declares more than one queue consumer, `el`
+- If your `wrangler.jsonc` declares more than one queue consumer, `kraai`
   can't tell which consumer's settings (`max_batch_size`, retry policy,
   dead letter queue) belong to which binding: there's no name/binding
   key at the consumer level to match on. With exactly one, it's copied

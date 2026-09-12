@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Use GitHub's [private vulnerability reporting](https://github.com/evatt-labs/el/security/advisories/new)
+Use GitHub's [private vulnerability reporting](https://github.com/evatt-labs/kraai/security/advisories/new)
 for this repository. Do not open a public issue for a security problem.
 
 You'll get an initial response within a few days. There's no fixed SLA
@@ -16,7 +16,7 @@ policy for older versions.
 
 ## Scope
 
-`el` runs with real Cloudflare and Neon credentials in scope (see
+`kraai` runs with real Cloudflare and Neon credentials in scope (see
 [Trust model](README.md#trust-model) in the README). In scope for a
 report:
 
@@ -27,10 +27,10 @@ report:
   resource it shouldn't (see [Bindings are not inherited by
   default](README.md#bindings-are-not-inherited-by-default)).
 - Command injection or arbitrary code execution beyond what
-  `el.config.mjs` already intentionally runs as ordinary Node code.
+  `kraai.config.mjs` already intentionally runs as ordinary Node code.
 - A CI/release supply-chain issue: an unpinned action, a workflow trigger
   that would let a fork's code run with this repo's secrets in scope.
 
-Out of scope: `el.config.mjs` itself is designed to run as trusted code
+Out of scope: `kraai.config.mjs` itself is designed to run as trusted code
 with full access to your environment, the same as `webpack.config.js` --
 that's not a vulnerability, it's documented behavior.

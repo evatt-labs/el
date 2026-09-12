@@ -1,7 +1,7 @@
 // Builds the config actually deployed for an ephemeral environment, from
 // the consumer's committed wrangler.jsonc.
 //
-// This exists because the first version of `el` mutated the loaded config
+// This exists because the first version of `kraai` mutated the loaded config
 // in place — setting `name`/`vars`/`hyperdrive` and leaving everything else
 // untouched. That meant any D1 database, KV namespace, R2 bucket, queue, or
 // Durable Object binding declared at the top level of wrangler.jsonc got
@@ -28,7 +28,7 @@ const SAFE_STRUCTURAL_KEYS = [
   // A Durable Object class lives inside the Worker script being deployed,
   // not in a separately provisioned resource — a fresh Worker name under a
   // new environment gets fresh DO storage automatically. There is nothing
-  // for `el` to provision, and nothing shared with production to leak.
+  // for `kraai` to provision, and nothing shared with production to leak.
   // `migrations` travels with `durable_objects` for the same reason: both
   // describe this deploy's own script, not an external resource.
   "durable_objects",
@@ -85,7 +85,7 @@ export function buildDeployConfig(
       throw new Error(
         `wrangler.jsonc declares ${foundStateful.join(", ")}, which would deploy this ` +
           `ephemeral environment with live access to those production resources. Declare ` +
-          `a matching d1/kv/r2/queues entry in el.config.mjs so el provisions a fresh one, ` +
+          `a matching d1/kv/r2/queues entry in kraai.config.mjs so kraai provisions a fresh one, ` +
           `or set unsafeInheritBindings: true on this service if inheriting production is ` +
           `really what you want — the name is deliberate.`,
       );

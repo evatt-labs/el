@@ -61,7 +61,7 @@ describe("buildDeployConfig", () => {
     expect(result.migrations).toEqual(configWithDO.migrations);
   });
 
-  // This is the actual bug a security audit found: the first version of `el`
+  // This is the actual bug a security audit found: the first version of `kraai`
   // deployed an ephemeral Worker with live access to whatever D1/KV/R2/queue
   // bindings the committed config declared, because it only ever overwrote
   // name/vars/hyperdrive and left everything else untouched.
@@ -100,7 +100,7 @@ describe("buildDeployConfig", () => {
     expect(result.triggers).toBeUndefined();
   });
 
-  // The point of this feature: when `el` has already provisioned a fresh,
+  // The point of this feature: when `kraai` has already provisioned a fresh,
   // environment-scoped resource, an override replaces the committed
   // (production-pointing) binding entirely — no opt-in needed, because
   // there's nothing production-pointing left in the deployed config.

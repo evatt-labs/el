@@ -135,8 +135,8 @@ export async function up({ name: environmentName, options, services, env, log })
     summary: [`branch: ${branch.name} (Neon)`],
     // Handed back to down() via the lockfile, so teardown can delete the
     // exact branch and Hyperdrive configs this run created instead of
-    // re-deriving their names from el.config.mjs, which may have changed by
-    // the time `el down` runs.
+    // re-deriving their names from kraai.config.mjs, which may have changed by
+    // the time `kraai down` runs.
     lock: { branchId: branch.id, branchName: branch.name, hyperdrive: hyperdriveIds },
   };
 }

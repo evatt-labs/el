@@ -1,12 +1,12 @@
-// Parses `el`'s CLI arguments into a plain object bin/el.mjs can act on,
+// Parses `kraai`'s CLI arguments into a plain object bin/kraai.mjs can act on,
 // so the grammar lives in one small, testable place instead of the manual
 // `process.argv.slice(2)` destructure that used to accept anything.
 //
 // Exactly three forms are supported:
 //
-//   el up [name] [--output <path>] [--no-open]
-//   el down <name>
-//   el help | --help | -h
+//   kraai up [name] [--output <path>] [--no-open]
+//   kraai down <name>
+//   kraai help | --help | -h
 //
 // Anything else (an unknown command, an unknown flag, a flag on `down`,
 // more than one positional) throws a plain Error whose message is meant to

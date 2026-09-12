@@ -16,10 +16,10 @@ import { deleteLock, lockPath, mergeResources, readLock } from "./lockfile.mjs";
 
 export async function down(config, name) {
   if (name === undefined) {
-    throw new Error("Usage: el down <environment-name>");
+    throw new Error("Usage: kraai down <environment-name>");
   }
   if (!isValidEnvironmentName(name)) {
-    throw new Error(`"${name}" doesn't look like an environment name \`el up\` would have created.`);
+    throw new Error(`"${name}" doesn't look like an environment name \`kraai up\` would have created.`);
   }
 
   let provider;
@@ -48,7 +48,7 @@ export async function down(config, name) {
   const lock = readLock(process.cwd(), name);
   if (!lock) {
     console.log(
-      `  (no ${lockPath(process.cwd(), name)} found; deleting only what el.config.mjs currently declares)`,
+      `  (no ${lockPath(process.cwd(), name)} found; deleting only what kraai.config.mjs currently declares)`,
     );
   }
 
@@ -88,7 +88,7 @@ export async function down(config, name) {
       await trackedTryDelete(`D1 database "${entry.name}"`, async () => {
         const database = await findD1DatabaseByName(token, accountId, entry.name);
         // Already gone is the goal, not a failure: a resource the merged
-        // list names but that a previous, partial `el down` already deleted
+        // list names but that a previous, partial `kraai down` already deleted
         // must not count as a warning, or the lockfile could never be
         // cleared on a retry (see the note on hadWarnings above).
         if (!database) {
@@ -169,7 +169,7 @@ export async function down(config, name) {
     deleteLock(process.cwd(), name);
   } else if (lock) {
     console.log(
-      `  (keeping ${lockPath(process.cwd(), name)}: teardown reported warnings above, rerun \`el down ${name}\` to retry)`,
+      `  (keeping ${lockPath(process.cwd(), name)}: teardown reported warnings above, rerun \`kraai down ${name}\` to retry)`,
     );
   }
 

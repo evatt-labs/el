@@ -7,7 +7,7 @@ import { deleteLock, emptyLock, lockPath, mergeResources, readLock, writeLock } 
 let cwd;
 
 beforeEach(() => {
-  cwd = mkdtempSync(path.join(tmpdir(), "el-lockfile-test-"));
+  cwd = mkdtempSync(path.join(tmpdir(), "kraai-lockfile-test-"));
 });
 
 afterEach(() => {
@@ -15,9 +15,9 @@ afterEach(() => {
 });
 
 describe("lockPath", () => {
-  it("builds .el/<name>.lock.json under the given directory", () => {
+  it("builds .kraai/<name>.lock.json under the given directory", () => {
     expect(lockPath("/tmp/proj", "blue-honey-badger-12345")).toBe(
-      path.join("/tmp/proj", ".el", "blue-honey-badger-12345.lock.json"),
+      path.join("/tmp/proj", ".kraai", "blue-honey-badger-12345.lock.json"),
     );
   });
 });
@@ -52,7 +52,7 @@ describe("writeLock / readLock", () => {
     expect(readLock(cwd, "n")).toEqual(lock);
   });
 
-  it("creates .el/ if it doesn't exist yet", () => {
+  it("creates .kraai/ if it doesn't exist yet", () => {
     const lock = emptyLock({ name: "n", elVersion: "0.5.0", accountId: "a", subdomain: "s" });
     writeLock(cwd, lock);
     expect(readFileSync(lockPath(cwd, "n"), "utf8")).toContain('"lockfileVersion": 1');
@@ -71,7 +71,7 @@ describe("writeLock / readLock", () => {
   });
 
   it("throws on a lockfile that isn't valid JSON", () => {
-    mkdirSync(path.join(cwd, ".el"), { recursive: true });
+    mkdirSync(path.join(cwd, ".kraai"), { recursive: true });
     writeFileSync(lockPath(cwd, "n"), "{ not json", { flag: "wx" });
     expect(() => readLock(cwd, "n")).toThrow(/not valid JSON/);
   });

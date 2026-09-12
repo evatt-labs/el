@@ -28,7 +28,7 @@ jobs:
     # trusted publishing is configured on an EXISTING package's settings
     # page on npmjs.com, so there is no way for this workflow to bootstrap
     # its own trust. After that one manual publish, add this repo +
-    # workflow filename as a trusted publisher for @evatt-labs/el on
+    # workflow filename as a trusted publisher for kraai on
     # npmjs.com (or `npm trust github`), and every push of a `v*` tag from
     # here on publishes with no stored token at all.
     #

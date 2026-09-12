@@ -1,4 +1,4 @@
-// The database provider registry. `database.provider` in el.config.mjs
+// The database provider registry. `database.provider` in kraai.config.mjs
 // resolves against this map when given as a string; a config can also
 // supply its own provider object directly, bypassing the registry entirely.
 // Neon is the only built-in today: this file is the one place a future
@@ -13,7 +13,7 @@ export const PROVIDERS = {
 /**
  * Resolves a `database.provider` value to an actual provider object. Shared
  * by config validation (src/config.mjs, which wraps whatever this throws
- * with the "Invalid el.config.mjs" prefix) and up.mjs/down.mjs (which call
+ * with the "Invalid kraai.config.mjs" prefix) and up.mjs/down.mjs (which call
  * this again at runtime against a config that has already passed
  * validation (cheap, and avoids threading the resolved provider through
  * loadConfig's return value).
@@ -68,7 +68,7 @@ export function resolveProvider(provider) {
  *
  * `lock` defaults to `{}` the same way `seed` does: additive, not breaking,
  * so an existing provider that predates the lockfile still works, it just
- * gives `down()` nothing extra to key off of and el falls back to its
+ * gives `down()` nothing extra to key off of and kraai falls back to its
  * name-based lookups for that provider's resources.
  */
 export function normalizeProviderResult(result, provider) {

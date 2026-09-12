@@ -3,5 +3,5 @@ coverage/
 .env
 .env.*
 !.env.example
-.el-deploy-*.json
+.kraai-deploy-*.json
 .DS_Store
