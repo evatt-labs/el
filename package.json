@@ -39,7 +39,7 @@
     "url": "git+https://github.com/evatt-labs/kraai.git"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^5.0.0",
     "vitest": "^4.1.11"
   }
 }
