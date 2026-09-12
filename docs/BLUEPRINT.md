@@ -38,6 +38,7 @@ further primitive or provider an additive module.
 | D14 | `NAME_PATTERN`, the `-pull-request-` infix, and `resourceName()` output are frozen for ephemeral environments. | Changing them orphans every environment already deployed by 0.4.x and 0.5.x. |
 | D15 | The resource model is open-ended by construction: one `ensure()` module plus one schema block per primitive, registered in a table keyed `provider/type` that `plan`/`apply`/`destroy` iterate. Adding a primitive never touches the verbs. | The end state is every Cloudflare hosting feature inside an environment (Vectorize, Workflows, AI Gateway, Images, Stream, Email Routing, Access, zones). A fixed enum would be rewritten at each one. |
 | D16 | Every service carries `provider:`, default `cloudflare`, omitted in every example today. State records `provider` on every resource. Credentials and the state backend are resolved per provider. | AWS, Azure, and GCP follow, BYO account for each. A service belongs to one cloud; resource type names (`d1`, `sqs`) already namespace themselves, so the key is the only schema cost, and it must exist before the first manifest is written by a user. |
+| D17 | Per-resource schemas are generated from each provider's own machine-readable source, never hand-transcribed: wrangler's config JSON Schema and Cloudflare's per-product OpenAPI for `cloudflare`; CloudFormation resource provider schemas (the Cloud Control API surface) for `aws`; `azure-rest-api-specs` OpenAPI for `azure`; Discovery Documents for `gcp`. Every generated schema also accepts `raw:`, merged verbatim into the underlying create/update call, so a field is always representable even before `kraai` gives it a native name. | The ask is Terraform-grade coverage of every option a provider exposes. Hand-authoring that per resource drifts the moment the provider ships a field; generating it from the same source Terraform/Bicep/Cloud Control already use is the only way to keep up, and every major cloud publishes one (verified 2026-09-12: AWS CloudFormation registry schemas + Cloud Control API, Azure's OpenAPI specs feeding Bicep's type system, GCP Discovery Documents feeding `magic-modules`). |
 
 ## Manifest schema
 
@@ -109,6 +110,57 @@ Resolution: base is loaded, overlay is loaded, both schema-validated
 independently, then merged by explicit rule per key (never a generic deep
 merge). `services` cannot be added or removed by an overlay; an overlay
 can only attach `routes` and `resources` to services the base declares.
+
+### Schema generation strategy (D17)
+
+Each provider module's resource schemas are build artifacts, not prose:
+a generator script pulls the provider's own machine-readable schema
+(wrangler's JSON Schema / OpenAPI for `cloudflare`, CloudFormation
+resource provider schemas for `aws`, `azure-rest-api-specs` for
+`azure`, Discovery Documents for `gcp`) and emits the validator plus
+the field table this document would otherwise hand-transcribe. Nothing
+in BLUEPRINT.md enumerates a provider's full field set for that reason;
+the generator is the source of truth, checked into the repo as generated
+output with its source commit/version recorded, regenerated on demand.
+
+Every generated schema accepts a sibling `raw:` object, merged directly
+into the underlying create/update request after `kraai`'s own fields are
+applied and after validation of everything else. `raw:` exists so a
+field newly added by a provider, or one `kraai` hasn't modeled a
+friendly name for yet, is never a blocker — it is never itself
+schema-validated beyond "must be an object."
+
+### Vocabulary (tentative — from the 2026-09-12 design session, not yet
+locked)
+
+The examples elsewhere in this document use the 0.5.0 Cloudflare-specific
+field names (`hyperdrive`, `d1`, `kv`, `r2`, `queues`) because they
+predate this session's vendor-neutral direction. The direction agreed so
+far, pending the generator work in D17 actually landing:
+
+- `providers: { compute: cloudflare, postgres: neon }` at the manifest
+  root names *who fulfils what*; vendor names appear nowhere else.
+- Services declare capabilities, not vendor resources: tentatively
+  `databases` (with `engine: sqlite | postgres`, replacing bare `d1`
+  and the top-level `database` block), `keyvalue` (replacing `kv`),
+  `objects` (replacing `r2`), `queues` (unchanged name, already
+  generic).
+- `binding` is the fixed, developer-chosen variable name the service
+  code reads (`env.DB`); it is never randomized and never appears in
+  the generated resource name. The underlying resource's actual name/id
+  is generated per `resourceName()` (ephemeral) or `naming` (persistent,
+  D8) and is what state and adoption track.
+- Engine-inherent tuning (Hyperdrive-style query `caching`, queue
+  consumer settings) nests under the resource entry itself, keyed by
+  concept, not by vendor. Vendor-only knobs nest under
+  `providers.<capability>` config instead.
+- Hyperdrive is not a user-facing concept: it is how Cloudflare
+  implements `engine: postgres`, provisioned invisibly the way D1 is
+  invisibly how it implements `engine: sqlite`.
+
+This vocabulary does not update the schema examples in this revision;
+that's the next review pass, once D17's generator exists to check the
+examples against instead of hand-typing them again.
 
 ### Validation rules
 
