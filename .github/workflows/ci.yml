@@ -26,8 +26,14 @@ jobs:
         with:
           node-version: "24"
 
+      # kraai's JS/npm line is frozen legacy (see legacy-node/README.md);
+      # the Go rewrite lives at the repo root. This job only validates
+      # legacy-node/ hasn't regressed — it is not the Go project's test
+      # suite. A separate job/workflow covers Go once it exists.
       - run: npm ci --ignore-scripts
+        working-directory: legacy-node
       - run: npm run test:coverage
+        working-directory: legacy-node
 
       # Tokenless: works for both same-repo and fork PRs uniformly, since
       # fork PRs get no secrets here either way (see the note above). No
@@ -35,5 +41,5 @@ jobs:
       # public rate limit if uploads get frequent enough to hit it.
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          files: coverage/lcov.info
+          files: legacy-node/coverage/lcov.info
           fail_ci_if_error: false
