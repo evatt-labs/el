@@ -31,7 +31,8 @@
     "preview-environments",
     "ephemeral",
     "ci",
-    "hyperdrive"
+    "hyperdrive",
+    "github-action"
   ],
   "repository": {
     "type": "git",

@@ -149,6 +149,114 @@ npx el down blue-honey-badger-12345
 Teardown is best-effort and safe to call after a partial failure. Rerun
 `el down` with the same name.
 
+## GitHub Action
+
+A composite action at the repo root wraps `el up`/`el down` for pull
+requests: one environment per PR, created on open and every push, a sticky
+comment with its URLs, torn down when the PR closes. It runs
+`bin/el.mjs` straight from the action's own checkout, so the `uses:` ref
+pins the exact `el` version; there's no npm install of `el` itself. Your
+workflow still runs `npm ci` first, because `el` refuses to run without a
+locally installed `wrangler`.
+
+```yaml
+name: el preview environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: el-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      # Checks out the PR's head SHA, not the default merge ref. On
+      # `closed` after a merge, the merge ref can already be gone, and
+      # `el down` still needs el.config.mjs to know what to tear down.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - run: npm ci
+
+      # el's own convention is SHA-pinning (see .github/workflows/ci.yml);
+      # the SHA for this tag lands once the release is cut.
+      - uses: evatt-labs/el@v0.5.0
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Only needed with the Neon provider. Omit if you're D1-only.
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+```
+
+### Inputs
+
+| Input               | Default              | Meaning |
+| -------------------- | -------------------- | ------- |
+| `mode`               | `auto`                | `auto` resolves to `down` when the event's action is `closed`, otherwise `up`. Set `up`/`down` to force one. |
+| `name`               | (derived)             | Explicit environment name. Overrides the one derived from the repo name and PR number. Must match el's name grammar. |
+| `working-directory`  | `.`                   | Directory containing `el.config.mjs`. |
+| `comment`            | `true`                | Whether to post or update the sticky PR comment. |
+| `github-token`       | `${{ github.token }}` | Token used only for the comment. |
+
+### Outputs
+
+| Output | Meaning |
+| ------ | ------- |
+| `name` | The environment name used for this run. |
+| `urls` | The JSON object `el up --output` wrote (`name`, `urls`, `summary`, `seed`), as a string. Only set in up mode. |
+| `mode` | The resolved mode, `up` or `down`. |
+
+### How re-runs work
+
+Every run does `el down` on the derived name first, then `el up` if the
+resolved mode is `up`. That's the re-run strategy: a fresh environment on
+every push, not a mutated one. The `down` is noisy on a PR's first push,
+since nothing exists yet to tear down; that's expected, and it doesn't
+fail the job. There's a brief gap between the old environment disappearing
+and the new one's URLs being live, same as any redeploy.
+
+`cancel-in-progress` on the concurrency group is safe specifically because
+the name is deterministic: if a push cancels an in-flight `up`, the next
+run's `down` reaps whatever that cancelled run left behind, using the same
+name it would have used anyway.
+
+### Fork PRs
+
+A pull request from a fork gets no repository secrets by default, so
+`CLOUDFLARE_API_TOKEN` is empty. The action detects that, prints a notice,
+skips every remaining step, posts no comment, and never fails the job.
+
+### Environment name derivation
+
+With no `name` input, the environment name is derived from the repository
+name and PR number: the repo name is lowercased, everything that isn't
+`a` through `z` is stripped, and the result is clamped to 2-15 characters
+(truncated if longer, padded with `x` if shorter). The PR number is
+zero-padded to 5 digits. See `environmentNameForPullRequest` in
+`src/names.mjs`.
+
+Two repositories that reduce to the same letters-only slug on the same
+Cloudflare account (`el-smoke` and `elsmoke`, say) would collide. Set the
+`name` input explicitly if that's a risk for you. PR numbers above 99999
+aren't supported; the action fails rather than silently truncating or
+wrapping a number that no longer fits the name format.
+
+See [Trust model](#trust-model) for why the action refuses to run on
+`pull_request_target`.
+
 ## Trust model
 
 Running `el up`/`el down` in a directory runs `el.config.mjs` from that
@@ -165,6 +273,9 @@ such as a `pull_request_target` workflow that checks out a fork's
 Cloudflare credentials, and your database provider's, directly. Trigger on
 `push`/`release` to branches you control, or on `pull_request` (forked PRs
 don't receive repository secrets by default).
+
+The [GitHub Action](#github-action) enforces this itself: it refuses to
+run at all on `pull_request_target`.
 
 ## `el.config.mjs`
 

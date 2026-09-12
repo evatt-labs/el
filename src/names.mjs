@@ -46,3 +46,42 @@ export function resourceName(environmentName, serviceKey, binding) {
   const name = `${environmentName}-${serviceKey}-${slug}`;
   return name.length <= 63 ? name : name.slice(0, 63).replace(/-+$/, "");
 }
+
+/**
+ * Builds a deterministic environment name for a pull request: one name per
+ * (repo, PR number) pair, so the GitHub Action's re-run strategy (down then
+ * up on every push) always targets the same environment instead of
+ * generating a fresh random one every run and orphaning the last one.
+ *
+ * `repoName` is reduced to its letters only (lowercased, everything else
+ * stripped), then clamped to the 2-15 character word length NAME_PATTERN
+ * requires: truncated if longer, padded with "x" if shorter (an
+ * empty-after-strip repo name becomes "xx" rather than failing).
+ *
+ * `prNumber` is zero-padded to NAME_PATTERN's fixed 5 digits. It is not
+ * truncated or wrapped if it doesn't fit: a PR number that large would
+ * silently collide with a different PR's name, so this throws instead.
+ */
+export function environmentNameForPullRequest(repoName, prNumber) {
+  if (!Number.isInteger(prNumber) || prNumber < 1 || prNumber > 99999) {
+    throw new Error(
+      `Pull request number must be a positive integer no greater than 99999 (got ${JSON.stringify(prNumber)}). ` +
+        "The numeric suffix of an environment name is exactly 5 digits, so it can't be truncated or wrapped.",
+    );
+  }
+
+  let repoWord = repoName.toLowerCase().replaceAll(/[^a-z]/g, "");
+  if (repoWord.length > 15) repoWord = repoWord.slice(0, 15);
+  while (repoWord.length < 2) repoWord += "x";
+
+  const padded = String(prNumber).padStart(5, "0");
+  const name = `${repoWord}-pull-request-${padded}`;
+
+  // Defensive: the construction above should always satisfy NAME_PATTERN,
+  // but assert it rather than silently handing back a name el's own
+  // validator would reject a moment later inside up()/down().
+  if (!isValidEnvironmentName(name)) {
+    throw new Error(`Generated name "${name}" is not a valid environment name (this is a bug in el).`);
+  }
+  return name;
+}
