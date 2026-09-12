@@ -102,6 +102,18 @@ workstreams:
       - >-
         Neon provider `up` becomes ensure-shaped for `database.mode: root`
         (no branch fork; bind the root branch, record `managed: external`).
+      - >-
+        Worker adoption per BLUEPRINT.md: read live bindings/vars/secret
+        names, refuse on undeclared ones unless `--allow-binding-drop`,
+        record `adoptedAt`.
+    verify_first:
+      - >-
+        `wrangler d1 migrations apply` re-run against a fully migrated
+        database is a no-op (docs imply it via `d1_migrations`; confirm live).
+      - >-
+        `wrangler deploy` over an existing Worker with a different bindings
+        set replaces the set rather than merging; confirm which secrets
+        survive.
     acceptance:
       - >-
         Running the same manifest twice produces no creates on the second run.
@@ -123,8 +135,13 @@ workstreams:
         `apply` = lock, plan, prompt if `protected`, ensure, write state per
         step, unlock. `--auto-approve`.
       - >-
-        `destroy` = lock, reverse-order delete of managed, detach external,
-        type-the-name prompt if `protected`.
+        `destroy` = lock, reverse-order delete of managed, leave external
+        untouched; `protected` needs typed name or `--confirm-name`, never
+        `--auto-approve`. `apply` on protected needs `--protected-ok`
+        alongside `--auto-approve`.
+      - >-
+        `--env` selects the overlay; state is keyed by the resolved name
+        (`from-pull-request` re-derived per command).
       - >-
         Hooks receive `environment`.
       - >-

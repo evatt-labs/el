@@ -190,27 +190,66 @@ kraai-state (R2 bucket, created on first apply if absent)
 
 `destroy` and `apply` may delete a resource only if it is present in state
 with `managed: kraai`. A resource that exists in the account but is absent
-from state is never touched. A resource marked `external` is detached from
-the Worker's bindings on destroy and otherwise left alone. There is no
-flag that overrides this.
+from state is never touched. A resource marked `external` is left alone on
+destroy; deleting the managed Worker that bound it is the detach. There is
+no flag that overrides this.
+
+Workers are always `managed: kraai`; there is no `external` Worker. Adopting
+one is the exception to D7 (no live refresh) and is defined below.
+
+### Worker adoption
+
+Bindings are not inherited by default, so a first `apply` that finds an
+existing Worker named `api` and simply deploys over it would drop every
+live binding, var, and secret the manifest doesn't declare. Instead:
+
+- `plan` emits `adopt` for a Worker that exists in the account but is
+  absent from state. Adopt reads the live Worker's bindings, vars, and
+  secret names.
+- If any live binding or var is absent from the manifest and the
+  overlay's `resources` block, `plan` lists them and `apply` refuses.
+  `--allow-binding-drop` overrides, once, and the dropped names are
+  written to the plan output.
+- Secret names are compared, never values. A secret the manifest's hooks
+  don't return is reported as "kept" and left in place; wrangler's
+  `secret put` is additive.
+- After adopt, the Worker is recorded in state as `managed: kraai` with
+  `adoptedAt` set, and every subsequent `apply` treats it as owned.
 
 ## Commands
 
 | Command | Does |
 |---------|------|
 | `kraai plan --env <name>` | Load base + overlay, load state, print create / update / detach / delete per resource. Exit 0 on no changes, 2 on changes, 1 on error. No mutation, no lock. |
-| `kraai apply --env <name>` | Acquire lock, run plan, apply it with the `protected` prompt if set, write state after every mutation (as `up` does today), release lock. `--auto-approve` for CI. |
-| `kraai destroy --env <name>` | Acquire lock, delete `managed: kraai` resources in reverse order, detach `external`, delete state only when no warnings. `protected` requires typing the environment name. |
+| `kraai apply --env <name>` | Acquire lock, run plan, apply it, write state after every mutation (as `up` does today), release lock. `--auto-approve` for CI. |
+| `kraai destroy --env <name>` | Acquire lock, delete `managed: kraai` resources in reverse order, leave `external` untouched, delete state only when no warnings. |
 | `kraai gc` | List ephemeral environments in the state bucket whose `ttl` has elapsed; destroy each. `--dry-run` lists only. |
 | `kraai state list \| show <name>` | Read-only views of the backend. |
 | `kraai up` / `kraai down` | Aliases for `apply` / `destroy` on an ephemeral overlay, removed one minor after `apply` ships. |
+
+`--env` selects the overlay file; the environment name is what the overlay
+resolves to. For `kind: persistent` they are the same string. For
+`name: from-pull-request` the name is `<repoword>-pull-request-NNNNN`,
+re-derived from the same PR context on every command, and state is keyed
+by that resolved name (`envs/<resolved>/state.json`). `gc` lists by
+resolved name.
+
+### `protected`
+
+`protected: true` is not decoration; it survives CI flags.
+
+- `apply`: interactive prompt. `--auto-approve` is accepted only together
+  with `--protected-ok`; either alone exits 1 with a message.
+- `destroy`: never accepts `--auto-approve`. Interactive runs must type
+  the environment name; non-interactive runs must pass
+  `--confirm-name <name>` and it must match exactly.
 
 Ensure semantics per resource type (find-or-create by name, adopt by id):
 
 | Resource | Find | Create | Update in place | Delete |
 |----------|------|--------|-----------------|--------|
-| Worker | by name | `wrangler deploy` | `wrangler deploy` (idempotent) | API delete |
-| D1 | by name / id | API create | migrations via `d1 migrations apply` (tracked in `d1_migrations`, re-run skips applied) | API delete |
+| Worker | by name (adopt, see above) | `wrangler deploy` | `wrangler deploy` | API delete |
+| D1 | by name / id | API create | migrations via `d1 migrations apply` (tracked in `d1_migrations`; re-run being a no-op is verify-first) | API delete |
 | KV | by title | API create | none | API delete |
 | R2 | by name | API create | none | empty then delete (as today) |
 | Queue | by name | API create | consumer settings | API delete |
@@ -276,7 +315,12 @@ Existing hooks that ignore the new argument keep working.
    address services by key. Confirm.
 2. Default backend for persistent envs is `r2`. If the credential path in
    D5 fails live, the fallback is a second env-var pair. Acceptable?
-3. `protected` prompts on `apply`, not only `destroy`. Confirm.
+3. `protected` prompts on `apply`, not only `destroy`, and `destroy` on a
+   protected env never takes `--auto-approve`. Confirm.
+5. Worker adoption refuses on undeclared live bindings unless
+   `--allow-binding-drop`. Alternative: adopt copies undeclared bindings
+   into state as `external` automatically. Proposed: refuse; explicit
+   beats inferred for prod.
 4. `gc` reads `ttl` from the overlay at apply time and stores the deadline
    in state. Alternative: compute at gc time from `updatedAt`. Proposed:
    store the deadline.
