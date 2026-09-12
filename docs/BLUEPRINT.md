@@ -9,8 +9,10 @@ target. When a decision here changes, change it here first.
 
 kraai is a multi-cloud devops control plane: environments (ephemeral and
 persistent) declared as manifests, applied with one command, across
-Cloudflare today and AWS/Azure/GCP as bring-your-own-account providers
-later. The direct competitive set is Terraform/Terragrunt (provisioning)
+AWS, Cloudflare, and Azure/GCP later, all bring-your-own-account. AWS
+ships first, not Cloudflare (D24) — kraai's own SaaS substrate is the
+first real proof, running on AWS, not the cloud kraai originated on.
+The direct competitive set is Terraform/Terragrunt (provisioning)
 and Flox (dev environments) — kraai's bet is owning both provisioning and
 deploy, as one abstraction, shipped as a single binary the way Terraform
 itself ships, and structurally faster:
@@ -51,7 +53,8 @@ itself ships, and structurally faster:
 | D20 | Code organization: heavy `internal/`, thin-to-nonexistent public `pkg/`, `cmd/kraai/` as a thin entrypoint wiring Cobra commands to `internal/` packages. | Mirrors Terraform's *own* actual structure — most of its codebase is `internal/`, deliberately, to force extension through the provider protocol rather than Go package imports. Directly relevant here since the WASM plugin ABI (D16) is kraai's real, intended extension surface, not its Go internals. |
 | D21 | Testing: 100% coverage as a CI-enforced target (reusing the existing codecov integration), achieved through interface-based dependency injection everywhere an external system is touched (cloud clients, the lock/status backend, hooks, the template engine) — every such interface gets a `//go:generate` directive generating its mock via `go.uber.org/mock`. `pgregory.net/rapid` (property-based testing) is used specifically on the pure, logic-dense code: naming derivation, manifest merge rules, diff computation. `ExampleFoo` functions where behavior doubles as documentation. Coverage-as-a-number is explicitly not the actual goal — meaningful assertions on real logic and edge cases are (own engineering rule); the property tests exist specifically so 100% coverage can't be gamed on the highest-risk pure logic. | `golang/mock` is dead (2023); `go.uber.org/mock` is its actively-maintained successor with an identical API. Go has no decorators — `_test.go` files living next to source, `//go:generate`, `ExampleFoo`, and `rapid` are the real, idiomatic mechanisms that get closest to "tests inline with and driven by the code," not a workaround for a missing language feature. |
 | D22 | `NAME_PATTERN`-equivalent ephemeral naming and `resourceName()`-equivalent output are frozen at their 0.5.0 JS values. Persistent environment names: `/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/`. | Changing them orphans every environment already deployed by 0.4.x/0.5.x, independent of the language rewrite. |
-| D23 | Routes/custom domains apply only from persistent environments, never ephemeral. Cloudflare Containers land after the core rewrite ships, as their own workstream, deferred exactly as before. AWS/Azure/GCP providers are a reserved capability (D-equivalent of the old D16's `provider:` key) but not designed in this cycle. | Unchanged reasoning from the archived blueprint; the rewrite doesn't reopen these. |
+| D23 | Routes/custom domains apply only from persistent environments, never ephemeral. Cloudflare Containers land after the core rewrite ships, as their own workstream, deferred exactly as before. Azure/GCP providers are a reserved capability but not designed in this cycle. | Unchanged reasoning from the archived blueprint; the rewrite doesn't reopen these. |
+| D24 | **AWS, not Cloudflare, is the first provider built after core scaffolding — and Cloudflare is not used at all for kraai's own SaaS substrate.** `lock-and-status` and `aws-provider` land before `cloudflare-provider`. Once `aws-provider` exists, kraai manages its own production kraai.dev infrastructure (kraai-api/kraai-web) live, on AWS, using minimal-cost AWS primitives (specific services — Lambda vs Fargate vs EC2, RDS vs keeping Neon — are a separate architecture decision for kraai-api's own blueprint, not this document). | Explicit: "nobody's gonna look twice if i'm using cloudflare. aws has to be the first poster child." A tool that only proves itself on the cloud it originated from doesn't demonstrate real multi-cloud capability to a skeptical audience; running kraai's own production infrastructure on AWS via kraai itself does. |
 
 ## Manifest schema
 

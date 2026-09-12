@@ -211,12 +211,11 @@ workstreams:
         `internal/envstate/` (name deliberately not "state" — this holds
         no resource inventory): `Lock.Acquire`/`Release`/staleness check,
         `Status.Write`/`Read`/`List`, one interface, one implementation
-        per provider's native conditional-write primitive (Cloudflare R2
-        first; AWS S3, Azure Blob, GCS stubbed/deferred to their own
-        provider workstreams).
+        per provider's native conditional-write primitive. **AWS S3 first**
+        (D24: AWS is the first POC target) — Cloudflare R2, Azure Blob, GCS
+        follow as their own providers land, same interface, no change to it.
       - >-
-        SigV4 (and equivalents) via the official `aws-sdk-go-v2` for R2/S3
-        rather than hand-rolled signing.
+        SigV4 via the official `aws-sdk-go-v2`, not hand-rolled signing.
     acceptance:
       - >-
         Two concurrent `Acquire` calls on the same environment: exactly
@@ -231,7 +230,43 @@ workstreams:
         unnecessary CAS complexity was added here.
     smoke: true
     smoke_notes: >-
-      Live against a real Cloudflare R2 bucket on the Evatt Labs account.
+      Live against a real S3 bucket on the AWS account that will host the
+      kraai SaaS substrate (D24) — this is the same account/bucket the
+      dogfooding work eventually depends on, not a disposable fixture.
+
+  - id: aws-provider
+    title: Built-in AWS provider — the first POC provider (D24)
+    status: proposed
+    depends: [lock-and-status]
+    decisions: [D6, D7, D8, D9, D24]
+    scope:
+      - >-
+        `internal/provider/aws/`: one `Resource` implementation per AWS
+        primitive needed to host the kraai SaaS substrate itself — exact
+        set (Lambda vs Fargate vs EC2, S3, RDS/keep-Neon, API Gateway,
+        etc.) is a separate architecture decision for kraai-api's own
+        blueprint, not decided here; this workstream builds whatever that
+        decision settles on, via `aws-sdk-go-v2`, each `Get` doing a live
+        lookup by deterministic name or import reference (never a stored
+        ID), per D7.
+      - >-
+        Per-resource schemas generated from CloudFormation resource
+        provider schemas (the Cloud Control API surface) per the archived
+        blueprint's D17, with a `raw:` passthrough.
+    acceptance:
+      - >-
+        `Get` on a resource that doesn't exist returns a typed
+        not-found result (not an error) that `plan` interprets as "needs
+        creating."
+      - >-
+        Running the same manifest twice against a live account produces
+        no creates on the second run.
+    smoke: true
+    smoke_notes: >-
+      Full round-trip (create, no-op re-run, update, delete) per resource
+      type against the real AWS account hosting kraai's own SaaS substrate
+      — this is dogfooding on production-intended infrastructure, not a
+      disposable fixture; treat accordingly (protected: true from day one).
 
   - id: cloudflare-provider
     title: Built-in cloudflare provider — Worker, D1, KV, R2, Queues, Hyperdrive
@@ -248,15 +283,13 @@ workstreams:
         wrangler-equivalent bundling, see verify_first).
       - >-
         Per-resource schemas generated from wrangler's config schema /
-        Cloudflare's OpenAPI (D5-equivalent of the archived blueprint's
-        D17), with a `raw:` passthrough.
+        Cloudflare's OpenAPI, with a `raw:` passthrough.
     verify_first:
       - >-
         Whether Worker deployment (bundling + upload) can be done via the
         Cloudflare REST API directly with acceptable fidelity, or whether
         this workstream still needs to shell out to `wrangler` for that
-        one step specifically (acceptable, but confirm before assuming
-        either way — this is a real scope decision, not a detail).
+        one step specifically.
     acceptance:
       - >-
         `Get` on a resource that doesn't exist returns a typed
@@ -268,12 +301,13 @@ workstreams:
     smoke: true
     smoke_notes: >-
       Full round-trip (create, no-op re-run, update, delete) per resource
-      type against the real Evatt Labs Cloudflare account.
+      type against the real Evatt Labs Cloudflare account. Second-priority
+      provider (D24) — not the dogfooding target.
 
   - id: plan-apply-destroy
     title: plan / apply / destroy verbs, two-phase execution, protected gating
     status: proposed
-    depends: [cloudflare-provider]
+    depends: [aws-provider]
     decisions: [D12, D13, D14, D19]
     scope:
       - >-
@@ -375,8 +409,8 @@ workstreams:
         the same per-verb `Resource` contract as everything else.
     smoke: true
 
-  - id: aws-provider
-    title: AWS provider surface (then Azure, GCP; BYO account each)
+  - id: azure-gcp-providers
+    title: Azure and GCP provider surfaces (BYO account each)
     status: proposed
     depends: [containers]
     decisions: []
@@ -386,5 +420,7 @@ workstreams:
     notes: >-
       Placeholder; not designed in this cycle. Reuses the same Resource
       contract, plugin-registry shape, and lock-and-status backend
-      (S3 conditional writes are the native primitive here) with no
-      change to any of those interfaces.
+      interface (Azure Blob / GCS conditional writes) with no change to
+      any of those interfaces. AWS is no longer in this placeholder — it
+      moved to `aws-provider`, built second overall, right after
+      `lock-and-status` (D24).
