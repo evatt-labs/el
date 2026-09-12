@@ -1,6 +1,6 @@
 {
   "name": "@evatt-labs/el",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Ephemeral full-stack preview environments on Cloudflare Workers, D1 by default, Neon via a pluggable database provider. Spin up a named, disposable environment and tear it down on command.",
   "license": "MIT",
   "type": "module",
