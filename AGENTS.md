@@ -57,8 +57,13 @@ this step must be done manually, once, from an authenticated npm account
 with 2FA:
 
 ```sh
-npm publish --access public
+npm publish --access public --provenance=false
 ```
+`--provenance=false` is required, not optional: `publishConfig.provenance` in
+package.json is `true`, so a plain `npm publish` tries to generate provenance
+even locally and fails with "Automatic provenance generation not supported for
+provider: null". Learned the hard way on the 2026-09-12 rename bootstrap.
+
 
 No `--provenance` here. npm only generates a provenance attestation when
 the publish runs inside a supported CI provider's OIDC context (GitHub
@@ -69,5 +74,7 @@ trusted publishing is configured (next step) it's generated regardless of
 the flag.
 
 Then, on npmjs.com, add `evatt-labs/kraai` and `publish.yml` as this
-package's trusted publisher (or `npm trust github kraai`). Every
+package's trusted publisher (or `npm trust github kraai --repo evatt-labs/kraai --file publish.yml --env npm
+--allow-publish`; the repo, workflow filename, and `environment: npm` must
+match publish.yml exactly, or CI's publish fails with a 404 on PUT). Every
 tag push after that publishes with no stored credential at all.
