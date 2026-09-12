@@ -29,7 +29,14 @@ jobs:
       # just pull_request). Verified live — the default token tagged
       # v0.1.1 successfully but publish.yml never ran. A token backed by
       # a real identity doesn't have that restriction.
+      #
+      # No `release-type` input here on purpose. Setting it switches the
+      # action into single-package mode and release-please-config.json is
+      # never read, which silently drops bump-minor-pre-major: the first
+      # `feat!:` commit produced a 1.0.0 release PR instead of 0.4.0.
+      # Omitting it makes the action read release-please-config.json and
+      # .release-please-manifest.json (its defaults), where release-type
+      # and the 0.x bump rules already live.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          release-type: node
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
