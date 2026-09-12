@@ -1,5 +1,5 @@
 import path from "node:path";
-import { writeFileSync } from "node:fs";
+import { readdirSync, writeFileSync } from "node:fs";
 import { requireEnv } from "./env.mjs";
 import { generateEnvironmentName, isValidEnvironmentName, resourceName } from "./names.mjs";
 import { resolveProvider, normalizeProviderResult } from "./providers/index.mjs";
@@ -10,7 +10,13 @@ import {
   createR2Bucket,
   createQueue,
 } from "./cloudflare.mjs";
-import { loadWranglerConfig, deployWithConfig, putSecret, applyD1Migrations } from "./wrangler.mjs";
+import {
+  loadWranglerConfig,
+  deployWithConfig,
+  putSecret,
+  applyD1Migrations,
+  getWranglerVersion,
+} from "./wrangler.mjs";
 import {
   buildDeployConfig,
   buildD1DatabasesOverride,
@@ -20,6 +26,8 @@ import {
 } from "./deploy-config.mjs";
 import { waitForReachable } from "./reachability.mjs";
 import { openUrl } from "./browser.mjs";
+import { emptyLock, writeLock } from "./lockfile.mjs";
+import { EL_VERSION } from "./version.mjs";
 
 /**
  * Provisions every D1/KV/R2/Queues resource one service declares, returning
@@ -82,6 +90,38 @@ async function provisionServiceResources(
   return overrides;
 }
 
+/**
+ * Lists the .sql files under each D1 binding's migrations_dir, for the
+ * lockfile. This records intent, not confirmed-applied state: the installed
+ * wrangler has no `--json` output for `d1 migrations apply` (confirmed by
+ * running `wrangler d1 migrations apply --help`), so there's no way to know
+ * from here which of these actually ran versus merely being present in the
+ * directory el pointed wrangler at. Named migrationFiles, not
+ * migrationsApplied, for exactly that reason - don't claim more than the
+ * data supports. Keyed by binding, since a service can declare more than
+ * one D1 database; a binding with no migrations_dir is left out entirely,
+ * and the whole field is omitted if no binding has one.
+ */
+function migrationFilesFor(serviceDir, baseConfig, d1Entries) {
+  const byBinding = {};
+  for (const entry of d1Entries ?? []) {
+    const baseEntry = (baseConfig.d1_databases ?? []).find((d) => d.binding === entry.binding);
+    if (!baseEntry?.migrations_dir) continue;
+    const migrationsDir = path.resolve(serviceDir, baseEntry.migrations_dir);
+    // Diagnostic metadata for the lockfile, same reasoning as
+    // getWranglerVersion: never let reading it fail a deploy that has
+    // otherwise already provisioned real infrastructure for this binding.
+    try {
+      byBinding[entry.binding] = readdirSync(migrationsDir)
+        .filter((file) => file.endsWith(".sql"))
+        .sort();
+    } catch {
+      // Leave this binding out rather than recording a wrong or empty list.
+    }
+  }
+  return Object.keys(byBinding).length > 0 ? byBinding : undefined;
+}
+
 export async function up(config, requestedName, { output, noOpen = false } = {}) {
   if (requestedName !== undefined && !isValidEnvironmentName(requestedName)) {
     throw new Error(
@@ -118,6 +158,16 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
     urls[service.key] = `https://${name}-${service.key}.${subdomain}.workers.dev`;
   }
 
+  // Written incrementally from here on, not only at the end, so a partial
+  // `up` (a crash mid-provisioning, a failed deploy) leaves an accurate
+  // partial record for `el down` to read instead of nothing. This is the fix
+  // for down.mjs deleting only what el.config.mjs currently declares: down
+  // reads this back and deletes the union of what it recorded and what
+  // config still says, so neither a config edit nor a missing lockfile can
+  // cause a resource to be silently skipped. See src/lockfile.mjs.
+  const lock = emptyLock({ name, elVersion: EL_VERSION, accountId: CLOUDFLARE_ACCOUNT_ID, subdomain });
+  writeLock(process.cwd(), lock);
+
   // Provider provisioning (Neon's branch fork + Hyperdrive, when configured)
   // happens before configure(), matching the ordering the Neon-only version
   // of this tool always had: the database exists, and its connection is
@@ -129,7 +179,7 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
   // providerResult unconditionally. With no provider configured at all,
   // these no-op defaults (no bindings, no seed helpers, no summary line)
   // are exactly what D1-only needs.
-  let providerResult = { bindings: () => ({}), seed: {}, summary: [] };
+  let providerResult = { bindings: () => ({}), seed: {}, summary: [], lock: {} };
   if (provider) {
     const result = await provider.up({
       name,
@@ -140,6 +190,15 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
     });
     providerResult = normalizeProviderResult(result, provider);
   }
+
+  // Provider options are safe to record here as-is only because Neon's are
+  // all non-secret identifiers (project, database, appRole). A future
+  // built-in provider whose options could carry something sensitive would
+  // need to redact before this write; don't copy this line blindly for one.
+  lock.database = provider
+    ? { provider: provider.name, options: providerOptions, lock: providerResult.lock }
+    : null;
+  writeLock(process.cwd(), lock);
 
   let vars = {};
   let secrets = {};
@@ -159,6 +218,53 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
       { token: CLOUDFLARE_API_TOKEN, accountId: CLOUDFLARE_ACCOUNT_ID },
       { name, service, serviceDir, baseConfig },
     );
+
+    // Recorded before the deploy, not after: the resources above already
+    // exist even if the deploy that follows fails, and a lockfile missing an
+    // entry for a service whose resources were actually created is exactly
+    // the kind of gap this feature exists to close. Note this is still
+    // per-service granularity, not per-resource: if provisioning a second D1
+    // database for this same service throws, the first is created but never
+    // makes it into the lock (provisionServiceResources isn't given the lock
+    // to write into mid-loop). That narrower window is a known limitation,
+    // not something this change closes.
+    const migrationFiles = migrationFilesFor(serviceDir, baseConfig, service.d1);
+    lock.services[service.key] = {
+      dir: service.dir,
+      workerName,
+      wranglerVersion: getWranglerVersion(serviceDir),
+      compatibilityDate: baseConfig.compatibility_date,
+      compatibilityFlags: baseConfig.compatibility_flags ?? [],
+      resources: {
+        d1: (service.d1 ?? []).map((entry) => ({
+          binding: entry.binding,
+          name: resourceOverrides.d1_databases?.find((d) => d.binding === entry.binding)?.database_name,
+        })),
+        // kv_namespaces overrides only carry the Cloudflare-assigned
+        // namespace id (what wrangler binds to at deploy time), not the
+        // human-readable title `el down` looks resources up by. Recompute
+        // that title the same deterministic way provisionServiceResources
+        // did when it created this namespace, rather than inventing a name
+        // field resourceOverrides doesn't have.
+        kv: (service.kv ?? []).map((entry) => ({
+          binding: entry.binding,
+          name: resourceName(name, service.key, entry.binding),
+        })),
+        r2: (service.r2 ?? []).map((entry) => ({
+          binding: entry.binding,
+          name: resourceOverrides.r2_buckets?.find((r) => r.binding === entry.binding)?.bucket_name,
+        })),
+        queues: (service.queues ?? []).map((entry) => ({
+          binding: entry.binding,
+          name: resourceOverrides.queues?.producers?.find((p) => p.binding === entry.binding)?.queue,
+        })),
+        hyperdrive: service.hyperdrive
+          ? [{ binding: service.hyperdrive.binding, id: providerResult.bindings(service).hyperdrive?.[0]?.id }]
+          : [],
+      },
+      ...(migrationFiles !== undefined ? { migrationFiles } : {}),
+    };
+    writeLock(process.cwd(), lock);
 
     console.log(`-> Deploying "${workerName}"...`);
     const deployConfig = buildDeployConfig(baseConfig, {

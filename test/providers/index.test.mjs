@@ -9,6 +9,7 @@ describe("normalizeProviderResult", () => {
     expect(result.bindings({ key: "api" })).toEqual({});
     expect(result.seed).toEqual({});
     expect(result.summary).toEqual([]);
+    expect(result.lock).toEqual({});
   });
 
   it("defaults everything when up() returned an empty object", () => {
@@ -16,12 +17,18 @@ describe("normalizeProviderResult", () => {
     expect(result.bindings({ key: "api" })).toEqual({});
     expect(result.seed).toEqual({});
     expect(result.summary).toEqual([]);
+    expect(result.lock).toEqual({});
   });
 
-  it("passes through a provided bindings function, seed, and summary", () => {
+  it("passes through a provided bindings function, seed, summary, and lock", () => {
     const bindings = (service) => ({ hyperdrive: [{ binding: "HYPERDRIVE", id: `${service.key}-id` }] });
     const result = normalizeProviderResult(
-      { bindings, seed: { ownerConnectionString: "postgres://..." }, summary: ["branch: main"] },
+      {
+        bindings,
+        seed: { ownerConnectionString: "postgres://..." },
+        summary: ["branch: main"],
+        lock: { branchId: "br-1", branchName: "main" },
+      },
       provider,
     );
     expect(result.bindings({ key: "api" })).toEqual({
@@ -29,6 +36,7 @@ describe("normalizeProviderResult", () => {
     });
     expect(result.seed).toEqual({ ownerConnectionString: "postgres://..." });
     expect(result.summary).toEqual(["branch: main"]);
+    expect(result.lock).toEqual({ branchId: "br-1", branchName: "main" });
   });
 
   it("throws a clear error naming the provider when bindings isn't a function", () => {

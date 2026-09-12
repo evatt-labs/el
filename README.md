@@ -239,6 +239,15 @@ the name is deterministic: if a push cancels an in-flight `up`, the next
 run's `down` reaps whatever that cancelled run left behind, using the same
 name it would have used anyway.
 
+The lockfile (see [Never](#never)) only helps here within a single job's
+checkout: `el up` writes it into that job's own working directory, which is
+gone by the time the next push's job checks out a fresh copy of the repo,
+so this re-run's `el down` still has no lockfile from the `up` that created
+the environment it's tearing down. The benefit today is local-machine and
+same-checkout only. Closing this gap for the Action's own re-runs would
+mean persisting `.el/` across jobs, e.g. as a workflow artifact or cache
+keyed on the environment name; this change doesn't do that.
+
 ### Fork PRs
 
 A pull request from a fork gets no repository secrets by default, so
@@ -383,9 +392,10 @@ A provider object looks like this:
       bindings(service) { /* return { hyperdrive: [...] } or {} */ },
       seed: { /* spread into seed()'s argument, if you have one */ },
       summary: ["..."],  // lines added to the final "is live" block
+      lock: { /* whatever down() needs to find this run's own resources */ },
     };
   },
-  async down({ name, options, services, env, log }) { /* best-effort */ },
+  async down({ name, options, services, env, log, lock }) { /* best-effort */ },
 }
 ```
 
@@ -396,6 +406,16 @@ wants Hyperdrive needs both. `log` is `console.log`, passed through so a
 provider's own step messages match `el`'s `-> ...` style. `down()` should
 never throw for a resource that's already gone; see `tryDelete` in
 `src/try-delete.mjs` for the pattern the Neon provider uses.
+
+`lock` is optional, on both sides. Whatever `up()` returns for it is written
+into `el`'s own per-environment lockfile and handed back to `down()` on
+teardown, so a provider can delete the exact resources it created (by id,
+by exact name, whatever it needs) instead of re-deriving them from
+`options`/`services` at teardown time, which may have changed since `up()`
+ran. The Neon provider uses this for its branch id and per-service
+Hyperdrive config ids. A provider that returns nothing for `lock` still
+works: `down()` gets `undefined` for it and falls back to whatever
+name-based lookup it already had.
 
 ## Bindings are not inherited by default
 
@@ -468,6 +488,15 @@ real one during a deploy, never contains secrets (those go over stdin to
 whatever `vars` your `configure()` hook returned. Gitignore
 `.el-deploy-*.json` in any repo this runs in, in case a crash leaves one
 behind before cleanup runs.
+
+`el up` also writes `.el/<environment-name>.lock.json`, the record of what
+it actually provisioned for that environment (see
+[Database providers](#database-providers) for what a provider puts in it,
+and `src/lockfile.mjs` for the full shape). It contains resource names and
+ids, never a connection string or secret. Gitignore `.el/` alongside
+`.el-deploy-*.json`. `el down` deletes it once teardown finishes with no
+warnings; if teardown warned about anything, it's left in place so a rerun
+of `el down` has it to work from.
 
 ## Known limitations
 
