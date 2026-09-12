@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/evatt-labs/kraai/compare/v0.4.3...v0.5.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the package is now `kraai` (bin `kraai`), the config file is `kraai.config.mjs`, and the lockfile directory is `.kraai/`. `@evatt-labs/el` is deprecated on npm and points here.
+
+### Features
+
+* rename el to kraai ([#33](https://github.com/evatt-labs/kraai/issues/33)) ([bc0bbf6](https://github.com/evatt-labs/kraai/commit/bc0bbf6206c8e53099d698950e9d8495ac05f8a9))
+
 ## [0.4.3](https://github.com/evatt-labs/el/compare/v0.4.2...v0.4.3) (2026-09-12)
 
 
