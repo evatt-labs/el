@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "kraai": "./bin/kraai.mjs"
+    "kraai": "bin/kraai.mjs"
   },
   "files": [
     "bin",
