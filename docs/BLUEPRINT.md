@@ -498,9 +498,15 @@ exactly as a 0.5.0 hooks file does. `environment` is
 4. ~~Worker adoption refuses on undeclared live bindings unless
    `--allow-binding-drop`.~~ **Resolved 2026-09-12: refuse by default**,
    explicit beats inferred for prod.
-5. `gc` reads `ttl` from the overlay at apply time and stores the deadline
-   in state. Alternative: compute at gc time from `updatedAt`. Proposed:
-   store the deadline.
+5. ~~`gc` reads `ttl` from the overlay at apply time and stores the
+   deadline in state.~~ **Resolved 2026-09-12: store the deadline**
+   (`expiresAt = updatedAt + ttl`), refreshed on every `apply` regardless
+   of whether resources changed. `gc` is then a pure function of state
+   alone — no dependency on a manifest that might not resolve anymore
+   (deleted branch, deleted PR), consistent with D7 (state only, no live
+   refresh), which matters more here since `gc` is destructive. Side
+   effect: a PR still receiving pushes never goes stale, since the
+   Action's re-apply on every push resets the clock for free.
 6. D18's override rule is warn-and-replace, never a hard error, even when
    a plugin overrides a built-in. Alternative: require an explicit
    `override: true` on the plugin registration, and fail without it.
