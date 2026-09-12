@@ -74,7 +74,12 @@ describe("parseArgs", () => {
   it.each([["--output", ["down", "name", "--output", "x"]], ["--no-open", ["down", "name", "--no-open"]]])(
     "treats %s as an unknown option on `down`",
     (flag, args) => {
-      expect(() => parseArgs(args)).toThrow(new RegExp(`Unknown option "${flag.replace(/[-]/g, "\\-")}"`));
+      // Both flags under test are literal strings, never attacker input, but
+      // building a RegExp from any variable should escape every regex
+      // metacharacter, not just `-`: CodeQL's js/incomplete-sanitization
+      // flagged the narrower escape (it missed backslash, among others).
+      const escaped = flag.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+      expect(() => parseArgs(args)).toThrow(new RegExp(`Unknown option "${escaped}"`));
     },
   );
 
