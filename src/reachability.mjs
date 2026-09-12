@@ -1,12 +1,12 @@
 // Waits for a freshly-deployed Worker to actually be reachable across
-// Cloudflare's edge before el considers provisioning done.
+// Cloudflare's edge before kraai considers provisioning done.
 //
-// Every environment `el up` creates gets a brand-new workers.dev hostname,
+// Every environment `kraai up` creates gets a brand-new workers.dev hostname,
 // never seen before — and Cloudflare's own docs are explicit that a first
 // deploy to a new workers.dev subdomain can show errors "while DNS is
 // propagating," which "should resolve themselves after a minute or so."
 // This isn't a one-off; it's a property of the ephemeral-naming pattern
-// itself; every `el up` run hits it. Without this wait, `up()` used to
+// itself; every `kraai up` run hits it. Without this wait, `up()` used to
 // print "is live" and open a browser tab into exactly that window.
 
 function sleep(ms) {

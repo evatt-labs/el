@@ -25,7 +25,7 @@ describe("waitForReachable", () => {
   });
 
   it("treats a real app's own error response as reachable, not as an edge error", async () => {
-    // The whole point: el can't assume the app has any particular route, so
+    // The whole point: kraai can't assume the app has any particular route, so
     // a 404 with the APP's own error shape must count as "reached the
     // Worker," not be confused with Cloudflare's edge fallback page.
     const fetchMock = vi

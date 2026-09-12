@@ -3,7 +3,7 @@
   "release-type": "node",
   "packages": {
     ".": {
-      "package-name": "@evatt-labs/el",
+      "package-name": "kraai",
       "changelog-path": "CHANGELOG.md",
       "initial-version": "0.1.0",
       "bump-minor-pre-major": true,

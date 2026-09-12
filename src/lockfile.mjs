@@ -1,9 +1,9 @@
-// Per-environment lockfile: `el up` records, incrementally, exactly what it
-// provisions. `el down` reads it back and deletes the union of what the lock
-// says was created and what el.config.mjs currently declares.
+// Per-environment lockfile: `kraai up` records, incrementally, exactly what it
+// provisions. `kraai down` reads it back and deletes the union of what the lock
+// says was created and what kraai.config.mjs currently declares.
 //
 // This exists because `down` used to derive what to delete only from the
-// CURRENT config. If a binding is removed from el.config.mjs between an `up`
+// CURRENT config. If a binding is removed from kraai.config.mjs between an `up`
 // and the matching `down` (the GitHub Action's down-then-up re-run does
 // exactly this across pushes), the resource that binding once provisioned is
 // never looked up and never deleted. The lock is the durable record that
@@ -17,7 +17,7 @@ import path from "node:path";
 import { resourceName } from "./names.mjs";
 
 export function lockPath(cwd, name) {
-  return path.join(cwd, ".el", `${name}.lock.json`);
+  return path.join(cwd, ".kraai", `${name}.lock.json`);
 }
 
 /**
@@ -41,14 +41,14 @@ export function emptyLock({ name, elVersion, accountId, subdomain }) {
 }
 
 /**
- * Writes the lock, creating `.el/` if this is the first write for this
+ * Writes the lock, creating `.kraai/` if this is the first write for this
  * environment. Safe to call repeatedly with a growing object: `up()` calls
  * this after every meaningful step (subdomain resolved, database
  * provisioned, each service deployed) so a partial `up` leaves an accurate
  * partial record instead of nothing.
  */
 export function writeLock(cwd, lock) {
-  mkdirSync(path.join(cwd, ".el"), { recursive: true });
+  mkdirSync(path.join(cwd, ".kraai"), { recursive: true });
   writeFileSync(lockPath(cwd, lock.name), `${JSON.stringify(lock, null, 2)}\n`);
 }
 

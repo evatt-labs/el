@@ -26,7 +26,7 @@ export function findWranglerBin(startDir) {
       throw new Error(
         `Could not find a locally-installed wrangler above ${startDir}. ` +
           `Add wrangler as a devDependency of this service (or the workspace root) — ` +
-          `el will not fall back to \`npx wrangler\`, which would run an unpinned version.`,
+          `kraai will not fall back to \`npx wrangler\`, which would run an unpinned version.`,
       );
     }
     dir = parent;
@@ -74,11 +74,11 @@ export function loadWranglerConfig(serviceDir) {
  * This file can contain whatever `configure()` returned for `vars` — plain
  * Worker vars, not secrets, but still worth not leaving lying around inside
  * what's usually a git working tree. Consumers should gitignore
- * `.el-deploy-*.json`.
+ * `.kraai-deploy-*.json`.
  */
 function runWithTempConfig(serviceDir, config, wranglerArgs) {
   const wrangler = findWranglerBin(serviceDir);
-  const configPath = path.join(serviceDir, `.el-deploy-${String(process.pid)}.json`);
+  const configPath = path.join(serviceDir, `.kraai-deploy-${String(process.pid)}.json`);
   writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
 
   const cleanup = () => rmSync(configPath, { force: true });

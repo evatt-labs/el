@@ -41,7 +41,7 @@ export function isValidEnvironmentName(name) {
 }
 
 /**
- * Builds the name for a resource `el` provisions on behalf of one binding —
+ * Builds the name for a resource `kraai` provisions on behalf of one binding —
  * `{env}-{serviceKey}-{binding}`, lowercased and hyphenated. R2 bucket names
  * specifically must be lowercase, DNS-compliant, and 63 characters or fewer;
  * this satisfies that for every resource type rather than having per-type
@@ -85,10 +85,10 @@ export function environmentNameForPullRequest(repoName, prNumber) {
   const name = `${repoWord}-pull-request-${padded}`;
 
   // Defensive: the construction above should always satisfy NAME_PATTERN,
-  // but assert it rather than silently handing back a name el's own
+  // but assert it rather than silently handing back a name kraai's own
   // validator would reject a moment later inside up()/down().
   if (!isValidEnvironmentName(name)) {
-    throw new Error(`Generated name "${name}" is not a valid environment name (this is a bug in el).`);
+    throw new Error(`Generated name "${name}" is not a valid environment name (this is a bug in kraai).`);
   }
   return name;
 }

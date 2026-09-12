@@ -46,12 +46,15 @@ already created for that tag.
 
 ### One-time npm bootstrap
 
-Trusted publishing only works once a package version already exists on
-the registry: trusted-publisher configuration lives on the package's own
-settings page on npmjs.com, so nothing can bootstrap its own trust on a
-name that's never been published. Before the first `v*` tag exists, this
-step must be done manually, once, from an authenticated npm account with
-2FA:
+`kraai` is a new package name (this repo previously published as
+`@evatt-labs/el`, deprecated on npm and pointing here), so trusted
+publishing has to be bootstrapped again exactly as it was for the
+original name: it only works once a package version already exists on
+the registry, and trusted-publisher configuration lives on the package's
+own settings page on npmjs.com, so nothing can bootstrap its own trust on
+a name that's never been published. Before the first `v*` tag exists,
+this step must be done manually, once, from an authenticated npm account
+with 2FA:
 
 ```sh
 npm publish --access public
@@ -65,6 +68,6 @@ release after this bootstrap gets provenance automatically, and once
 trusted publishing is configured (next step) it's generated regardless of
 the flag.
 
-Then, on npmjs.com, add `evatt-labs/el` and `publish.yml` as this
-package's trusted publisher (or `npm trust github @evatt-labs/el`). Every
+Then, on npmjs.com, add `evatt-labs/kraai` and `publish.yml` as this
+package's trusted publisher (or `npm trust github kraai`). Every
 tag push after that publishes with no stored credential at all.

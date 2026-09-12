@@ -27,7 +27,7 @@ import {
 import { waitForReachable } from "./reachability.mjs";
 import { openUrl } from "./browser.mjs";
 import { emptyLock, writeLock } from "./lockfile.mjs";
-import { EL_VERSION } from "./version.mjs";
+import { KRAAI_VERSION } from "./version.mjs";
 
 /**
  * Provisions every D1/KV/R2/Queues resource one service declares, returning
@@ -96,7 +96,7 @@ async function provisionServiceResources(
  * wrangler has no `--json` output for `d1 migrations apply` (confirmed by
  * running `wrangler d1 migrations apply --help`), so there's no way to know
  * from here which of these actually ran versus merely being present in the
- * directory el pointed wrangler at. Named migrationFiles, not
+ * directory kraai pointed wrangler at. Named migrationFiles, not
  * migrationsApplied, for exactly that reason - don't claim more than the
  * data supports. Keyed by binding, since a service can declare more than
  * one D1 database; a binding with no migrations_dir is left out entirely,
@@ -130,7 +130,7 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
   }
   const name = requestedName ?? generateEnvironmentName();
 
-  // A `database` block is optional. With none, el is D1-only: no database
+  // A `database` block is optional. With none, kraai is D1-only: no database
   // provider means no extra required env var, and providerResult keeps its
   // no-op defaults for the rest of this run (empty bindings, no seed
   // helpers, no summary line).
@@ -160,12 +160,12 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
 
   // Written incrementally from here on, not only at the end, so a partial
   // `up` (a crash mid-provisioning, a failed deploy) leaves an accurate
-  // partial record for `el down` to read instead of nothing. This is the fix
-  // for down.mjs deleting only what el.config.mjs currently declares: down
+  // partial record for `kraai down` to read instead of nothing. This is the fix
+  // for down.mjs deleting only what kraai.config.mjs currently declares: down
   // reads this back and deletes the union of what it recorded and what
   // config still says, so neither a config edit nor a missing lockfile can
   // cause a resource to be silently skipped. See src/lockfile.mjs.
-  const lock = emptyLock({ name, elVersion: EL_VERSION, accountId: CLOUDFLARE_ACCOUNT_ID, subdomain });
+  const lock = emptyLock({ name, elVersion: KRAAI_VERSION, accountId: CLOUDFLARE_ACCOUNT_ID, subdomain });
   writeLock(process.cwd(), lock);
 
   // Provider provisioning (Neon's branch fork + Hyperdrive, when configured)
@@ -242,7 +242,7 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
         })),
         // kv_namespaces overrides only carry the Cloudflare-assigned
         // namespace id (what wrangler binds to at deploy time), not the
-        // human-readable title `el down` looks resources up by. Recompute
+        // human-readable title `kraai down` looks resources up by. Recompute
         // that title the same deterministic way provisionServiceResources
         // did when it created this namespace, rather than inventing a name
         // field resourceOverrides doesn't have.
@@ -297,7 +297,7 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
   // ownerConnectionString/runSql/quoteLiteral without a provider configured
   // gets `undefined` for each, same as any other missing object property.
   //
-  // providerResult.seed is spread first, name/urls second, so el's own
+  // providerResult.seed is spread first, name/urls second, so kraai's own
   // keys always win: a provider whose seed object happened to use `name`
   // or `urls` as a field can't shadow the environment name or its URLs.
   let seedResult = {};
@@ -322,7 +322,7 @@ export async function up(config, requestedName, { output, noOpen = false } = {})
   for (const [key, url] of Object.entries(urls)) lines.push(`  ${key}: ${url}`);
   for (const line of providerResult.summary) lines.push(`  ${line}`);
   for (const [label, value] of Object.entries(seedResult)) lines.push(`  ${label}: ${value}`);
-  lines.push(`\nTear it down:\n\n  el down ${name}\n`);
+  lines.push(`\nTear it down:\n\n  kraai down ${name}\n`);
   console.log(lines.join("\n"));
 
   const result = { name, urls, summary: providerResult.summary, seed: seedResult };
