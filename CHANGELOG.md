@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/evatt-labs/el/compare/v0.4.2...v0.4.3) (2026-09-12)
+
+
+### Features
+
+* record a per-environment lockfile and use it to fix a teardown leak ([#31](https://github.com/evatt-labs/el/issues/31)) ([be9e72e](https://github.com/evatt-labs/el/commit/be9e72e1bc2ba81df0bb798902c797252ce492a2))
+
 ## [0.4.2](https://github.com/evatt-labs/el/compare/v0.4.1...v0.4.2) (2026-09-12)
 
 
