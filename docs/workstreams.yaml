@@ -91,11 +91,15 @@ workstreams:
     title: Find-or-create and adopt for every resource type
     status: proposed
     depends: [state-v2-local]
-    decisions: [D4]
+    decisions: [D4, D15]
     scope:
       - >-
         Per-type `ensure()` in `src/resources/`: Worker, D1, KV, R2, Queue,
         Hyperdrive; find by name/id, create if absent, record `managed`.
+      - >-
+        Resource registry: each module exports `{ type, schema, ensure, destroy, plan }`
+        and the verbs iterate the registry; adding a primitive is a new file
+        plus one registry line, no verb change.
       - >-
         Adopt `resources.<svc>.<type>.<binding>: { managed: external, id|name }`
         from the overlay; verify the resource exists before recording it.

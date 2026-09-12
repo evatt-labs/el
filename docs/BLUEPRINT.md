@@ -12,6 +12,10 @@ ephemeral (a pull request) or persistent (`dev`, `qa`, `prod`), described
 in YAML and applied with one command. Today `kraai` does the ephemeral
 half from a JS config. This blueprint turns it into the whole thing.
 
+End state: every Cloudflare hosting primitive is expressible inside an
+environment. This cycle ships the six that exist today plus the machinery
+(D15) that makes each further one an additive module.
+
 ## Decisions, one line each
 
 | # | Decision | Why |
@@ -30,6 +34,7 @@ half from a JS config. This blueprint turns it into the whole thing.
 | D12 | The Action moves to `kraai apply --env preview` with remote state. | Closes the README's admitted gap: down-then-up across pushes has no lockfile today. |
 | D13 | Containers come after persistent semantics, as their own workstream. | Agreed earlier; nothing here blocks them, and adding them first would double the surface under change. |
 | D14 | `NAME_PATTERN`, the `-pull-request-` infix, and `resourceName()` output are frozen for ephemeral environments. | Changing them orphans every environment already deployed by 0.4.x and 0.5.x. |
+| D15 | The resource model is open-ended by construction: one `ensure()` module plus one schema block per Cloudflare primitive, registered in a table that `plan`/`apply`/`destroy` iterate. Adding a primitive never touches the verbs. | The end state is every Cloudflare hosting feature inside an environment (Vectorize, Workflows, AI Gateway, Images, Stream, Email Routing, Access, zones). A fixed enum would be rewritten at each one. |
 
 ## Manifest schema
 
