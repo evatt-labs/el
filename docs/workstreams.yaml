@@ -1,0 +1,255 @@
+# Machine-readable companion to BLUEPRINT.md. Order is the dependency order.
+# Each workstream is one PR (or a short chain of PRs) implemented by a Sonnet
+# worker, reviewed before merge, live-smoked where `smoke` is set.
+#
+# status: proposed | in-progress | done
+# depends: workstream ids that must be merged first
+
+version: 1
+
+workstreams:
+  - id: manifest-loader
+    title: YAML manifest loader and schema
+    status: proposed
+    depends: []
+    decisions: [D1, D2, D10, D14]
+    scope:
+      - >-
+        Add `yaml` as the single runtime dependency, pinned exact; document
+        the exception in AGENTS.md and SECURITY.md.
+      - >-
+        New `src/manifest.mjs`: load `kraai.yaml` and `environments/<name>.yaml`,
+        validate each with a hand-written schema that rejects unknown keys at
+        every level and reports the failing path.
+      - >-
+        Explicit per-key merge of base + overlay; no generic deep merge.
+      - >-
+        `services` becomes a map; the existing per-service validation moves
+        over unchanged.
+      - >-
+        Keep `kraai.config.mjs` loading working; both formats resolve to the
+        same internal config object that `up`/`down` consume today.
+    acceptance:
+      - >-
+        Every example in BLUEPRINT.md parses; every rule under
+        "Validation rules" has a failing test.
+      - >-
+        An overlay that adds a service key not in the base is rejected.
+      - >-
+        `npm test` green; no change to ephemeral naming output (existing
+        names tests untouched and passing).
+    smoke: false
+
+  - id: naming-policy
+    title: Persistent name grammar and Worker naming policy
+    status: proposed
+    depends: [manifest-loader]
+    decisions: [D3, D8, D14]
+    scope:
+      - >-
+        `isValidEnvironmentName` gains a `kind` argument; persistent grammar
+        is `/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/`, ephemeral grammar unchanged.
+      - >-
+        `workerName(environment, serviceKey)` applying `naming.workers` then
+        `naming.prefix`; `resourceName()` gains the same prefix rule for
+        managed resources only.
+      - >-
+        Enforce 63-char workers.dev limit at validation time.
+    acceptance:
+      - >-
+        `prod`, `qa`, `dev` accepted as persistent; rejected as ephemeral.
+      - >-
+        Existing ephemeral name and resource name tests pass byte-for-byte.
+    smoke: false
+
+  - id: state-v2-local
+    title: State document v2 on the local backend, ownership invariant
+    status: proposed
+    depends: [naming-policy]
+    decisions: [D3, D4]
+    scope:
+      - >-
+        `src/state/` with a backend interface `{ read, write(ifVersion), lock, unlock, list }`
+        and a `local` implementation over `.kraai/<name>.state.json`.
+      - >-
+        v1 lockfile read + in-place upgrade to v2 (`managed: kraai` on every
+        resource).
+      - >-
+        Every resource record carries `managed`; `down` refuses to delete
+        anything not in state or marked `external`.
+    acceptance:
+      - >-
+        Unit tests for v1→v2 upgrade, for refusal to delete unrecorded
+        resources, and for detach-not-delete on `external`.
+      - >-
+        `kraai down` against a v1 lockfile still tears down cleanly.
+    smoke: true
+    smoke_notes: >-
+      D1-only fixture; confirm an `external` D1 survives `down`.
+
+  - id: ensure-semantics
+    title: Find-or-create and adopt for every resource type
+    status: proposed
+    depends: [state-v2-local]
+    decisions: [D4]
+    scope:
+      - >-
+        Per-type `ensure()` in `src/resources/`: Worker, D1, KV, R2, Queue,
+        Hyperdrive; find by name/id, create if absent, record `managed`.
+      - >-
+        Adopt `resources.<svc>.<type>.<binding>: { managed: external, id|name }`
+        from the overlay; verify the resource exists before recording it.
+      - >-
+        Neon provider `up` becomes ensure-shaped for `database.mode: root`
+        (no branch fork; bind the root branch, record `managed: external`).
+    acceptance:
+      - >-
+        Running the same manifest twice produces no creates on the second run.
+      - >-
+        Adopting a non-existent id fails before any mutation.
+    smoke: true
+    smoke_notes: >-
+      Neon fixture, `mode: root` and `mode: fork` both round-trip.
+
+  - id: plan-apply-destroy
+    title: plan / apply / destroy verbs, protected environments
+    status: proposed
+    depends: [ensure-semantics]
+    decisions: [D6, D7, D11]
+    scope:
+      - >-
+        `plan` diffs manifest vs state; exit codes 0/2/1; never locks.
+      - >-
+        `apply` = lock, plan, prompt if `protected`, ensure, write state per
+        step, unlock. `--auto-approve`.
+      - >-
+        `destroy` = lock, reverse-order delete of managed, detach external,
+        type-the-name prompt if `protected`.
+      - >-
+        Hooks receive `environment`.
+      - >-
+        `up`/`down` become aliases with a deprecation line.
+    acceptance:
+      - >-
+        Tests cover plan output for create/update/detach/delete and the
+        protected prompts (stdin stubbed).
+      - >-
+        README "Known limitations" no longer lists the ownership gap.
+    smoke: true
+    smoke_notes: >-
+      persistent `dev` env applied twice, then destroyed.
+
+  - id: state-backend-r2
+    title: Remote state and lock in the account's R2 bucket
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: [D5]
+    scope:
+      - >-
+        SigV4 signing in stdlib (`node:crypto`), no AWS SDK.
+      - >-
+        Bucket `kraai-state` created on first use; objects
+        `envs/<name>/state.json` (If-Match CAS) and `envs/<name>/lock`
+        (If-None-Match: *), 30-minute stale threshold, `--force-unlock`.
+      - >-
+        `state: { backend: r2 | local }` in the overlay; defaults per
+        BLUEPRINT.md.
+    verify_first:
+      - >-
+        Whether `sha256(CLOUDFLARE_API_TOKEN)` + token id from
+        `/user/tokens/verify` signs against the S3 endpoint for a
+        general-purpose token with `Workers R2 Storage Edit`. If not, add
+        `KRAAI_R2_ACCESS_KEY_ID` / `KRAAI_R2_SECRET_ACCESS_KEY` and document.
+    acceptance:
+      - >-
+        Two concurrent `apply` runs: the second fails fast with the holder's
+        identity; no interleaved state writes.
+      - >-
+        A 412 on state CAS aborts before any further mutation.
+    smoke: true
+
+  - id: action-remote-state
+    title: GitHub Action moves to apply with remote state
+    status: proposed
+    depends: [state-backend-r2]
+    decisions: [D12]
+    scope:
+      - >-
+        Action runs `kraai apply --env preview --auto-approve`; close runs
+        `kraai destroy --env preview --auto-approve`.
+      - >-
+        Remove the README paragraph admitting down-then-up has no lockfile
+        across pushes.
+    acceptance:
+      - >-
+        `kraai-action-smoke` open/sync/close cycle; the sync run's plan
+        shows updates, not creates.
+    smoke: true
+
+  - id: gc
+    title: kraai gc for expired ephemeral environments
+    status: proposed
+    depends: [action-remote-state]
+    decisions: [D12]
+    scope:
+      - >-
+        `ttl` stored as an absolute deadline in state at apply time.
+      - >-
+        `kraai gc [--dry-run]` lists and destroys expired ephemeral envs.
+    acceptance:
+      - >-
+        Never touches persistent environments, by test.
+    smoke: true
+
+  - id: routes
+    title: Routes and custom domains for persistent environments
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: [D9]
+    verify_first:
+      - >-
+        Exact zone-level permission names required for routes and custom
+        domains, from the Cloudflare permissions reference; expand the README
+        token table.
+    scope:
+      - >-
+        Apply `routes` from persistent overlays into the deploy config; keep
+        `NEVER_INHERITED_KEYS` behavior for ephemeral.
+    acceptance:
+      - >-
+        Ephemeral overlay with `routes` rejects at validation.
+    smoke: true
+    smoke_notes: >-
+      needs a zone on the Evatt Labs account.
+
+  - id: containers
+    title: Cloudflare Containers as a service type
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: [D13]
+    verify_first:
+      - >-
+        Image naming per Worker in the Cloudflare registry, so images can be
+        deleted on destroy; only then allowlist `containers` in
+        `deploy-config.mjs`.
+    scope:
+      - >-
+        `services.<key>.container: { dockerfile, instance_type, max_instances }`
+        rendered to `containers[]` + a Durable Object binding.
+      - >-
+        Destroy deletes the image.
+    acceptance:
+      - >-
+        Deploy, hit through the Worker, destroy leaves no image behind.
+    smoke: true
+
+  - id: aws
+    title: AWS provider surface
+    status: proposed
+    depends: [containers]
+    decisions: []
+    scope: []
+    acceptance: []
+    smoke: false
+    notes: >-
+      placeholder; not designed in this cycle.
