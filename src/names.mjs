@@ -1,5 +1,7 @@
 // Generates "blue-honey-badger-12345" style environment names.
 
+import { randomInt } from "node:crypto";
+
 const COLORS = [
   "blue", "red", "green", "amber", "violet", "coral", "teal", "slate",
   "crimson", "azure", "olive", "copper", "indigo", "scarlet", "jade",
@@ -15,12 +17,17 @@ const ANIMALS = [
   "gecko", "puffin", "jackal", "bison", "civet", "tapir", "kestrel",
 ];
 
+// randomInt rather than Math.random: the name ends up in a workers.dev
+// hostname and, since the lockfile, in a path on disk. Neither is a secret
+// and predictability of the name is not a security property here, but a
+// CSPRNG costs nothing, and it keeps CodeQL's insecure-randomness rule
+// from flagging every sink the name flows into.
 function pick(list) {
-  return list[Math.floor(Math.random() * list.length)];
+  return list[randomInt(list.length)];
 }
 
 export function generateEnvironmentName() {
-  const suffix = Math.floor(10_000 + Math.random() * 90_000);
+  const suffix = randomInt(10_000, 100_000);
   return `${pick(COLORS)}-${pick(ADJECTIVES)}-${pick(ANIMALS)}-${String(suffix)}`;
 }
 
