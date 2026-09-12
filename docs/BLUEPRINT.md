@@ -495,10 +495,9 @@ exactly as a 0.5.0 hooks file does. `environment` is
    (D20), so CI's own gating (GitHub Environment required reviewers,
    `workflow_dispatch` inputs) can drive it without `kraai` knowing
    anything about approval flows.
-4. Worker adoption refuses on undeclared live bindings unless
-   `--allow-binding-drop`. Alternative: adopt copies undeclared bindings
-   into state as `external` automatically. Proposed: refuse; explicit
-   beats inferred for prod.
+4. ~~Worker adoption refuses on undeclared live bindings unless
+   `--allow-binding-drop`.~~ **Resolved 2026-09-12: refuse by default**,
+   explicit beats inferred for prod.
 5. `gc` reads `ttl` from the overlay at apply time and stores the deadline
    in state. Alternative: compute at gc time from `updatedAt`. Proposed:
    store the deadline.
