@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/evatt-labs/el/compare/v0.4.0...v0.4.1) (2026-09-12)
+
+
+### Features
+
+* ship a GitHub Action for one preview environment per pull request ([#27](https://github.com/evatt-labs/el/issues/27)) ([747d4bd](https://github.com/evatt-labs/el/commit/747d4bda39f8353743fa9cfb8199227be991c9d1))
+
 ## [0.4.0](https://github.com/evatt-labs/el/compare/v0.3.0...v0.4.0) (2026-09-12)
 
 
