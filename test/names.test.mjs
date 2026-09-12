@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { generateEnvironmentName, isValidEnvironmentName, resourceName } from "../src/names.mjs";
+import {
+  generateEnvironmentName,
+  isValidEnvironmentName,
+  resourceName,
+  environmentNameForPullRequest,
+} from "../src/names.mjs";
 
 describe("generateEnvironmentName", () => {
   it("produces a name matching its own validator", () => {
@@ -63,5 +68,54 @@ describe("resourceName", () => {
     const long = resourceName("n", "api", "A".repeat(80));
     expect(long.length).toBeLessThanOrEqual(63);
     expect(long.endsWith("-")).toBe(false);
+  });
+});
+
+describe("environmentNameForPullRequest", () => {
+  it("builds a deterministic name from a typical repo and PR number", () => {
+    expect(environmentNameForPullRequest("el-smoke", 42)).toBe("elsmoke-pull-request-00042");
+  });
+
+  it("lowercases and strips digits/punctuation from the repo name", () => {
+    expect(environmentNameForPullRequest("kraai-api_2", 1)).toBe("kraaiapi-pull-request-00001");
+  });
+
+  it("truncates an overlong repo name to 15 letters", () => {
+    const repoWord = environmentNameForPullRequest("a".repeat(20), 1).split("-")[0];
+    expect(repoWord).toBe("a".repeat(15));
+  });
+
+  it("pads a repo name that is empty after stripping to \"xx\"", () => {
+    expect(environmentNameForPullRequest("12345", 1)).toBe("xx-pull-request-00001");
+  });
+
+  it("pads PR 1 to 00001", () => {
+    expect(environmentNameForPullRequest("repo", 1)).toBe("repo-pull-request-00001");
+  });
+
+  it("accepts the maximum PR number, 99999", () => {
+    expect(environmentNameForPullRequest("repo", 99999)).toBe("repo-pull-request-99999");
+  });
+
+  it("throws on a PR number above 99999", () => {
+    expect(() => environmentNameForPullRequest("repo", 100000)).toThrow(/positive integer/);
+  });
+
+  it("throws on PR number 0", () => {
+    expect(() => environmentNameForPullRequest("repo", 0)).toThrow(/positive integer/);
+  });
+
+  it("throws on a non-integer PR number", () => {
+    expect(() => environmentNameForPullRequest("repo", 1.5)).toThrow(/positive integer/);
+  });
+
+  it.each([
+    ["el-smoke", 1],
+    ["kraai-api_2", 42],
+    ["a".repeat(20), 99999],
+    ["12345", 7],
+    ["Repo-With-CAPS", 100],
+  ])("every accepted result passes isValidEnvironmentName (%s, %i)", (repoName, prNumber) => {
+    expect(isValidEnvironmentName(environmentNameForPullRequest(repoName, prNumber))).toBe(true);
   });
 });

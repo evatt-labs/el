@@ -1,4 +1,5 @@
 import path from "node:path";
+import { writeFileSync } from "node:fs";
 import { requireEnv } from "./env.mjs";
 import { generateEnvironmentName, isValidEnvironmentName, resourceName } from "./names.mjs";
 import { resolveProvider, normalizeProviderResult } from "./providers/index.mjs";
@@ -81,7 +82,7 @@ async function provisionServiceResources(
   return overrides;
 }
 
-export async function up(config, requestedName) {
+export async function up(config, requestedName, { output, noOpen = false } = {}) {
   if (requestedName !== undefined && !isValidEnvironmentName(requestedName)) {
     throw new Error(
       `"${requestedName}" doesn't match the expected word-word-word-NNNNN shape. Omit it to generate one.`,
@@ -204,7 +205,9 @@ export async function up(config, requestedName) {
       })) ?? {};
   }
 
-  if (config.open) {
+  if (noOpen) {
+    if (config.open) console.log("-> Skipping open() (--no-open)");
+  } else if (config.open) {
     console.log("-> Opening URLs in your browser...");
     for (const url of config.open({ name, urls })) openUrl(url);
   }
@@ -216,5 +219,18 @@ export async function up(config, requestedName) {
   lines.push(`\nTear it down:\n\n  el down ${name}\n`);
   console.log(lines.join("\n"));
 
-  return { name, urls };
+  const result = { name, urls, summary: providerResult.summary, seed: seedResult };
+
+  if (output) {
+    // Deliberately limited to these four keys: name, urls, summary, seed.
+    // No connection strings, no vars, no secrets. This file is meant to be
+    // read back by a CI workflow (the GitHub Action does exactly that) and
+    // may end up somewhere less locked-down than the process that produced
+    // it, so it never carries anything a hook returned that isn't already
+    // safe to hand to a third party.
+    const outputPath = path.resolve(process.cwd(), output);
+    writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  return result;
 }

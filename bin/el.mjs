@@ -2,11 +2,16 @@
 import { loadConfig } from "../src/config.mjs";
 import { up } from "../src/up.mjs";
 import { down } from "../src/down.mjs";
+import { parseArgs } from "../src/cli-args.mjs";
 
 const HELP = `el: ephemeral full-stack preview environments on Cloudflare Workers
 
 Usage:
-  el up [name]     Spin up an environment. Generates a name if omitted.
+  el up [name] [--output <path>] [--no-open]
+                   Spin up an environment. Generates a name if omitted.
+                   --output <path>  Write a JSON summary (name, urls,
+                                     summary, seed) to path after it's up.
+                   --no-open        Skip the open() hook entirely.
   el down <name>   Tear down an environment by name.
   el help          Show this message.
 
@@ -25,28 +30,29 @@ branch.
 `;
 
 async function main() {
-  const [command, arg] = process.argv.slice(2);
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(`${error.message}\n`);
+    console.log(HELP);
+    process.exitCode = 1;
+    return;
+  }
 
-  if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+  if (args.command === "help") {
     console.log(HELP);
     return;
   }
 
   // el.config.mjs is arbitrary code in the current directory (that's the
-  // point — it's the extension mechanism) — only load it once the command
-  // actually needs it, not for `el <typo>`.
-  if (command === "up") {
-    await up(await loadConfig(), arg);
+  // point, it's the extension mechanism) so it's only loaded once the
+  // command actually needs it, not for an argument error above.
+  if (args.command === "up") {
+    await up(await loadConfig(), args.name, { output: args.output, noOpen: args.noOpen });
     return;
   }
-  if (command === "down") {
-    await down(await loadConfig(), arg);
-    return;
-  }
-
-  console.error(`Unknown command "${command}"\n`);
-  console.log(HELP);
-  process.exitCode = 1;
+  await down(await loadConfig(), args.name);
 }
 
 main().catch((error) => {
