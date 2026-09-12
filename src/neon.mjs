@@ -18,11 +18,27 @@ async function neonFetch(apiKey, urlPath, options = {}) {
   return body;
 }
 
-export async function findProjectByName(apiKey, name) {
-  const { projects } = await neonFetch(apiKey, "/projects");
+/**
+ * Every Neon account now has at least one organization, and /projects
+ * (unlike every project-scoped endpoint below it) refuses to list anything
+ * without an org_id, confirmed empirically: it 400s with "org_id is
+ * required" otherwise. `orgId` is optional here so a caller that already
+ * knows it (the Neon provider resolves it once via resolveOrgId, see
+ * providers/neon.mjs) can skip the lookup this function would otherwise
+ * need to do itself.
+ */
+export async function findProjectByName(apiKey, name, orgId) {
+  const query = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
+  const { projects } = await neonFetch(apiKey, `/projects${query}`);
   const project = projects.find((p) => p.name === name);
   if (!project) throw new Error(`No Neon project named "${name}" found`);
   return project;
+}
+
+/** Lists every organization this API key's account belongs to. */
+export async function findOrganizations(apiKey) {
+  const { organizations } = await neonFetch(apiKey, "/users/me/organizations");
+  return organizations;
 }
 
 export async function findDefaultBranch(apiKey, projectId) {

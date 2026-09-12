@@ -113,6 +113,12 @@ keys > Create new API key. This is `NEON_API_KEY` below. It's scoped to
 your whole Neon account, not one project: treat it like any credential
 that can create and destroy databases.
 
+Every Neon account belongs to at least one organization. `el` resolves
+which one automatically when there's exactly one, which is the common
+case; an account that belongs to more than one needs `orgId` set
+explicitly in the `database` config (see below), or `el up`/`el down`
+fail with an error naming every organization the key can see.
+
 ### Set your environment variables
 
 Export these, or put them in a `.env` file in your project root
@@ -359,8 +365,9 @@ database: {
   provider: "neon",   // "neon" is the only built-in, registered in
                        // src/providers/index.mjs
   project: "acme",    // everything except `provider` is passed to it as
-  database: "neondb", // `options`: for Neon, project, database, appRole
-  appRole: "app_user",
+  database: "neondb", // `options`: for Neon, project, database, appRole,
+  appRole: "app_user", // and optionally orgId (only needed when the
+  // orgId: "org-...", // API key's account belongs to more than one org)
 },
 ```
 
