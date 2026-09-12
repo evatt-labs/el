@@ -1,16 +1,17 @@
 // Loads and validates el.config.mjs from the current working directory.
 //
-// The config contract is deliberately narrow: el knows how to fork a Neon
-// branch, verify the role it hands out isn't RLS-exempt, create a Hyperdrive
-// config, and deploy named Cloudflare Workers. It knows nothing about your
-// application — auth schemes, JWT signing, seed data, and which URLs are
-// worth opening in a browser are all yours to supply via hooks.
+// The config contract is deliberately narrow: el knows how to deploy named
+// Cloudflare Workers, provision per-service D1/KV/R2/Queues resources, and,
+// if a `database` provider is configured, provision that database ahead of
+// the deploy. With no `database` block, el is D1-only: no database
+// credentials, no Hyperdrive. It knows nothing about your application:
+// auth schemes, JWT signing, seed data, and which URLs are worth opening in
+// a browser are all yours to supply via hooks.
 
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-
-const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+import { resolveProvider } from "./providers/index.mjs";
 
 function fail(message) {
   throw new Error(`Invalid el.config.mjs: ${message}`);
@@ -38,18 +39,29 @@ export function validate(config) {
     fail("default export must be an object");
   }
 
-  const { neon, services } = config;
-  if (typeof neon?.project !== "string" || neon.project === "") {
-    fail("neon.project must be a non-empty string");
-  }
-  if (typeof neon?.database !== "string" || neon.database === "") {
-    fail("neon.database must be a non-empty string");
-  }
-  if (typeof neon?.appRole !== "string" || !IDENTIFIER.test(neon.appRole)) {
+  if (config.neon !== undefined) {
     fail(
-      "neon.appRole must be a valid Postgres identifier (the least-privilege role Hyperdrive " +
-        `connects as) — got ${JSON.stringify(neon?.appRole)}`,
+      `the top-level "neon" key was removed in 0.4.0, move it to ` +
+        `database: { provider: "neon", project, database, appRole }`,
     );
+  }
+
+  const { database, services } = config;
+
+  if (database !== undefined) {
+    if (typeof database !== "object" || database === null || Array.isArray(database)) {
+      fail("database must be an object if provided");
+    }
+    const { provider: providerRef, ...options } = database;
+    let provider;
+    try {
+      provider = resolveProvider(providerRef);
+    } catch (error) {
+      fail(error.message);
+    }
+    if (typeof provider.validate === "function") {
+      provider.validate(options);
+    }
   }
 
   if (!Array.isArray(services) || services.length === 0) {
@@ -67,6 +79,12 @@ export function validate(config) {
     }
     if (service.hyperdrive && typeof service.hyperdrive.binding !== "string") {
       fail(`service "${service.key}": hyperdrive.binding must be a string when hyperdrive is set`);
+    }
+    if (service.hyperdrive && database === undefined) {
+      fail(
+        `service "${service.key}": hyperdrive requires a database provider, add a top-level ` +
+          `"database" block to el.config.mjs`,
+      );
     }
     if (
       service.unsafeInheritBindings !== undefined &&

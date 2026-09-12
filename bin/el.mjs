@@ -3,21 +3,25 @@ import { loadConfig } from "../src/config.mjs";
 import { up } from "../src/up.mjs";
 import { down } from "../src/down.mjs";
 
-const HELP = `el — ephemeral full-stack preview environments on Cloudflare Workers + Neon
+const HELP = `el: ephemeral full-stack preview environments on Cloudflare Workers
 
 Usage:
   el up [name]     Spin up an environment. Generates a name if omitted.
   el down <name>   Tear down an environment by name.
   el help          Show this message.
 
-Requires an el.config.mjs in the current directory, and NEON_API_KEY,
-CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID in the environment or a .env
-file. See https://github.com/evatt-labs/el for the config format.
+Requires an el.config.mjs in the current directory, and CLOUDFLARE_API_TOKEN,
+CLOUDFLARE_ACCOUNT_ID in the environment or a .env file. With no top-level
+"database" block, that's all el needs: it's D1-only. Configuring a database
+provider (Neon is the only built-in) adds that provider's own required env
+vars, e.g. NEON_API_KEY. See https://github.com/evatt-labs/el for the config
+format.
 
 el.config.mjs runs as ordinary Node code with full access to your
-environment (including NEON_API_KEY/CLOUDFLARE_API_TOKEN) — only run
-\`el up\`/\`el down\` against a config you trust. Never wire this into a
-workflow that runs against an untrusted fork's branch.
+environment (including CLOUDFLARE_API_TOKEN and any database provider
+credentials). Only run \`el up\`/\`el down\` against a config you trust.
+Never wire this into a workflow that runs against an untrusted fork's
+branch.
 `;
 
 async function main() {
