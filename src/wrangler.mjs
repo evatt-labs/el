@@ -15,7 +15,7 @@ import path from "node:path";
  * land directly on those. Failing here with a clear message is the
  * intentional trade for that risk, not an oversight.
  */
-function findWranglerBin(startDir) {
+export function findWranglerBin(startDir) {
   let dir = path.resolve(startDir);
   const binName = process.platform === "win32" ? "wrangler.cmd" : "wrangler";
   while (true) {
@@ -142,6 +142,35 @@ export function putSecret(serviceDir, workerName, secretName, value) {
     input: value,
     stdio: ["pipe", "inherit", "inherit"],
   });
+}
+
+/**
+ * Pulls a version like "4.131.1" out of wrangler's own `--version` output,
+ * which is a banner rather than a bare version string. Pure, so it's
+ * testable without a real wrangler install; a bare version string still
+ * matches, and anything with no version-shaped substring comes back
+ * undefined rather than throwing, since this is diagnostic metadata for the
+ * lockfile, not something that should ever fail a deploy.
+ */
+export function parseWranglerVersion(stdout) {
+  const match = /\d+\.\d+\.\d+/.exec(stdout);
+  return match ? match[0] : undefined;
+}
+
+/**
+ * Resolves and runs the local wrangler just to read its version, for the
+ * lockfile. Same reasoning as parseWranglerVersion: never throws, since a
+ * failure here (wrangler missing, `--version` behaving unexpectedly) is not
+ * a reason to fail provisioning that has otherwise succeeded.
+ */
+export function getWranglerVersion(serviceDir) {
+  try {
+    const wrangler = findWranglerBin(serviceDir);
+    const output = execFileSync(wrangler, ["--version"], { encoding: "utf8" });
+    return parseWranglerVersion(output);
+  } catch {
+    return undefined;
+  }
 }
 
 export function deleteWorker(serviceDir, workerName) {

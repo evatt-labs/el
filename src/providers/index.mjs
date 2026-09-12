@@ -58,13 +58,18 @@ export function resolveProvider(provider) {
  * Normalizes whatever a provider's up() resolved to into the shape up.mjs
  * relies on everywhere downstream: bindings() always a callable function
  * that always returns an object, seed always an object, summary always an
- * array. A provider is free to return `{}` or nothing at all from up() (no
- * hyperdrive support, nothing for seed(), nothing for the summary), and its
- * bindings() is free to return nothing for a service it has no binding
- * for. Without this, up.mjs would call `undefined()` or read `.hyperdrive`
- * off `undefined` the first time it asked a compliant-but-minimal provider
- * for a service's bindings, after that provider had already provisioned
- * real infrastructure.
+ * array, lock always an object. A provider is free to return `{}` or nothing
+ * at all from up() (no hyperdrive support, nothing for seed(), nothing for
+ * the summary, nothing for the lockfile), and its bindings() is free to
+ * return nothing for a service it has no binding for. Without this, up.mjs
+ * would call `undefined()` or read `.hyperdrive` off `undefined` the first
+ * time it asked a compliant-but-minimal provider for a service's bindings,
+ * after that provider had already provisioned real infrastructure.
+ *
+ * `lock` defaults to `{}` the same way `seed` does: additive, not breaking,
+ * so an existing provider that predates the lockfile still works, it just
+ * gives `down()` nothing extra to key off of and el falls back to its
+ * name-based lookups for that provider's resources.
  */
 export function normalizeProviderResult(result, provider) {
   if (result?.bindings !== undefined && typeof result.bindings !== "function") {
@@ -78,5 +83,6 @@ export function normalizeProviderResult(result, provider) {
     },
     seed: result?.seed ?? {},
     summary: result?.summary ?? [],
+    lock: result?.lock ?? {},
   };
 }

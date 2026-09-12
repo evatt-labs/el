@@ -133,10 +133,15 @@ export async function up({ name: environmentName, options, services, env, log })
       quoteLiteral,
     },
     summary: [`branch: ${branch.name} (Neon)`],
+    // Handed back to down() via the lockfile, so teardown can delete the
+    // exact branch and Hyperdrive configs this run created instead of
+    // re-deriving their names from el.config.mjs, which may have changed by
+    // the time `el down` runs.
+    lock: { branchId: branch.id, branchName: branch.name, hyperdrive: hyperdriveIds },
   };
 }
 
-export async function down({ name: environmentName, options, services, env, log }) {
+export async function down({ name: environmentName, options, services, env, log, lock }) {
   const { NEON_API_KEY, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = env;
   const token = CLOUDFLARE_API_TOKEN;
   const accountId = CLOUDFLARE_ACCOUNT_ID;
@@ -145,7 +150,16 @@ export async function down({ name: environmentName, options, services, env, log 
   for (const service of services) {
     if (!service.hyperdrive) continue;
     const configName = `${environmentName}-${service.key}-hyperdrive`;
+    const lockedId = lock?.hyperdrive?.[service.key];
     await tryDelete(`Hyperdrive config "${configName}"`, async () => {
+      // The lock already has the exact config id up() created: delete it
+      // directly rather than searching for it by name. Falls back to the
+      // name-based lookup with no lock (an environment created before this
+      // change, or by a custom provider that doesn't return one).
+      if (lockedId) {
+        await deleteHyperdriveConfig(token, accountId, lockedId);
+        return;
+      }
       const hyperdrive = await findHyperdriveConfigByName(token, accountId, configName);
       if (!hyperdrive) throw new Error("not found");
       await deleteHyperdriveConfig(token, accountId, hyperdrive.id);
@@ -156,6 +170,13 @@ export async function down({ name: environmentName, options, services, env, log 
   await tryDelete(`Neon branch "${environmentName}"`, async () => {
     const orgId = options.orgId ?? resolveOrgId(await findOrganizations(NEON_API_KEY));
     const project = await findProjectByName(NEON_API_KEY, options.project, orgId);
+    // Neon's delete-branch API takes a branch id, not a name, so the lock's
+    // branchId is what actually lets this skip a lookup - findBranchByName
+    // still runs with no lock, same fallback reasoning as Hyperdrive above.
+    if (lock?.branchId) {
+      await deleteBranch(NEON_API_KEY, project.id, lock.branchId);
+      return;
+    }
     const branch = await findBranchByName(NEON_API_KEY, project.id, environmentName);
     if (!branch) {
       console.warn(`  (no Neon branch named "${environmentName}" found, skipping)`);
