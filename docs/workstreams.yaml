@@ -33,6 +33,9 @@ workstreams:
       - >-
         Keep `kraai.config.mjs` loading working; both formats resolve to the
         same internal config object that `up`/`down` consume today.
+      - >-
+        Accept a top-level `plugins:` array of non-empty strings; shape-only
+        validation here, resolution and loading belong to `plugin-architecture`.
     acceptance:
       - >-
         Every example in BLUEPRINT.md parses; every rule under
@@ -45,6 +48,47 @@ workstreams:
       - >-
         `npm test` green; no change to ephemeral naming output (existing
         names tests untouched and passing).
+    smoke: false
+
+  - id: plugin-architecture
+    title: Unified plugin registry (providers, resource types, state backends, middleware)
+    status: proposed
+    depends: [manifest-loader]
+    decisions: [D15, D16, D18]
+    scope:
+      - >-
+        `src/plugins.mjs`: resolve each `plugins:` entry (npm package name
+        or local file path), import it, validate its exported shape
+        (`{ name, providers?, resourceTypes?, stateBackends?, middleware? }`).
+      - >-
+        Assemble one registry by loading built-ins first — the `cloudflare`
+        provider and its resource types, the `s3-compatible` and `local`
+        state backends, each itself a plugin module — then the project's own
+        `plugins:` list in declared order.
+      - >-
+        Override rule: a later registration for the same key (provider
+        capability/vendor pair, `provider/type` resource key, or state
+        backend name) replaces an earlier one and logs a warning naming the
+        overriding plugin; nothing fails validation on an override.
+      - >-
+        Compose each plugin's `middleware` array, in load order, into one
+        function per seam (`resource.ensure`, `resource.destroy`,
+        `state.read`, `state.write`) for later workstreams to call through.
+      - >-
+        Retire `src/providers/index.mjs` (0.5.0's ad hoc provider registry)
+        in favor of this one; the `neon` built-in moves over with no
+        behavior change.
+    acceptance:
+      - >-
+        A local-file plugin overriding the built-in `cloudflare` provider
+        for `postgres` wins, with a logged warning; removing it restores
+        the built-in.
+      - >-
+        An unresolvable plugin name fails fast, naming the plugin, before
+        any provider/resource/backend code runs.
+      - >-
+        Existing `neon` provider tests pass unchanged against the new
+        registry.
     smoke: false
 
   - id: naming-policy
@@ -72,12 +116,13 @@ workstreams:
   - id: state-v2-local
     title: State document v2 on the local backend, ownership invariant
     status: proposed
-    depends: [naming-policy]
-    decisions: [D3, D4, D16]
+    depends: [naming-policy, plugin-architecture]
+    decisions: [D3, D4, D16, D18]
     scope:
       - >-
         `src/state/` with a backend interface `{ read, write(ifVersion), lock, unlock, list }`
-        and a `local` implementation over `.kraai/<name>.state.json`.
+        matching the `stateBackends` plugin shape, and a `local`
+        implementation over `.kraai/<name>.state.json` registered through it.
       - >-
         v1 lockfile read + in-place upgrade to v2 (`managed: kraai` on every
         resource, `provider: cloudflare` on every service).
@@ -98,15 +143,16 @@ workstreams:
     title: Find-or-create and adopt for every resource type
     status: proposed
     depends: [state-v2-local]
-    decisions: [D4, D15]
+    decisions: [D4, D15, D18]
     scope:
       - >-
         Per-type `ensure()` in `src/resources/`: Worker, D1, KV, R2, Queue,
         Hyperdrive; find by name/id, create if absent, record `managed`.
       - >-
-        Resource registry: each module exports `{ type, schema, ensure, destroy, plan }`
-        and the verbs iterate the registry; adding a primitive is a new file
-        plus one registry line, no verb change.
+        Each module exports `{ type, schema, ensure, destroy, plan }` and
+        registers as a `resourceTypes` entry on the `cloudflare` built-in
+        plugin from `plugin-architecture`, not a bespoke table; the verbs
+        iterate the plugin registry directly.
       - >-
         Adopt `resources.<svc>.<type>.<binding>: { managed: external, id|name }`
         from the overlay; verify the resource exists before recording it.
@@ -138,7 +184,7 @@ workstreams:
     title: plan / apply / destroy verbs, protected environments
     status: proposed
     depends: [ensure-semantics]
-    decisions: [D6, D7, D11]
+    decisions: [D6, D7, D11, D19]
     scope:
       - >-
         `plan` diffs manifest vs state; exit codes 0/2/1; never locks.
@@ -154,7 +200,13 @@ workstreams:
         `--env` selects the overlay; state is keyed by the resolved name
         (`from-pull-request` re-derived per command).
       - >-
-        Hooks receive `environment`.
+        Hooks receive `environment`, and gain the full pre/post set from
+        BLUEPRINT.md's Lifecycle hooks section, firing around validate,
+        plan, apply, destroy, and each per-resource operation.
+      - >-
+        Every `resource.ensure`/`resource.destroy`/`state.read`/
+        `state.write` call runs through the composed middleware from
+        `plugin-architecture`.
       - >-
         `up`/`down` become aliases with a deprecation line.
     acceptance:
@@ -162,33 +214,42 @@ workstreams:
         Tests cover plan output for create/update/detach/delete and the
         protected prompts (stdin stubbed).
       - >-
+        Lifecycle hooks fire in the documented order; a hooks file
+        implementing none of the new ones behaves exactly as 0.5.0.
+      - >-
+        A test middleware that short-circuits `resource.ensure` (declines
+        to call `next()`) prevents the underlying create, provably.
+      - >-
         README "Known limitations" no longer lists the ownership gap.
     smoke: true
     smoke_notes: >-
       persistent `dev` env applied twice, then destroyed.
 
-  - id: state-backend-r2
-    title: Remote state and lock in the account's R2 bucket
+  - id: state-backend-s3compat
+    title: Remote state and lock on a generic S3-compatible backend
     status: proposed
-    depends: [plan-apply-destroy]
-    decisions: [D5]
+    depends: [plan-apply-destroy, plugin-architecture]
+    decisions: [D5, D18]
     scope:
       - >-
-        SigV4 signing in stdlib (`node:crypto`), no AWS SDK.
+        SigV4 signing in stdlib (`node:crypto`), no AWS SDK; registered as
+        the `s3-compatible` `stateBackends` plugin entry.
       - >-
-        Bucket `kraai-state` created on first use; objects
-        `envs/<name>/state.json` (If-Match CAS) and `envs/<name>/lock`
-        (If-None-Match: *), 30-minute stale threshold, `--force-unlock`.
+        Config: `endpoint`, `bucket`, `region` (default `auto`),
+        credentials from `accessKeyId`/`secretAccessKey` or
+        `KRAAI_STATE_ACCESS_KEY_ID`/`KRAAI_STATE_SECRET_ACCESS_KEY` — never
+        a Cloudflare API token or any cloud-specific identity token.
       - >-
-        `state: { backend: r2 | local }` in the overlay; defaults per
-        BLUEPRINT.md.
-    verify_first:
+        Objects `envs/<name>/state.json` (If-Match CAS) and
+        `envs/<name>/lock` (If-None-Match: *), 30-minute stale threshold,
+        `--force-unlock`.
       - >-
-        Whether `sha256(CLOUDFLARE_API_TOKEN)` + token id from
-        `/user/tokens/verify` signs against the S3 endpoint for a
-        general-purpose token with `Workers R2 Storage Edit`. If not, add
-        `KRAAI_R2_ACCESS_KEY_ID` / `KRAAI_R2_SECRET_ACCESS_KEY` and document.
+        `state: { backend: s3-compatible | local, ...backendConfig }` in
+        the overlay; defaults per BLUEPRINT.md.
     acceptance:
+      - >-
+        Live-verified against at least two distinct S3-compatible endpoints
+        (Cloudflare R2 and one other, e.g. MinIO) with the same code path.
       - >-
         Two concurrent `apply` runs: the second fails fast with the holder's
         identity; no interleaved state writes.
@@ -199,7 +260,7 @@ workstreams:
   - id: action-remote-state
     title: GitHub Action moves to apply with remote state
     status: proposed
-    depends: [state-backend-r2]
+    depends: [state-backend-s3compat]
     decisions: [D12]
     scope:
       - >-

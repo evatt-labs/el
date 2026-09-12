@@ -16,7 +16,7 @@ End state: every Cloudflare hosting primitive is expressible inside an
 environment, and the same manifest grammar later spans AWS, Azure, and
 GCP, each a bring-your-own account. This cycle ships the six Cloudflare
 primitives that exist today plus the machinery (D15, D16) that makes each
-further primitive or provider an additive module.
+further primitive, provider, or extension author an additive module.
 
 ## Decisions, one line each
 
@@ -26,7 +26,7 @@ further primitive or provider an additive module.
 | D2 | One base file `kraai.yaml` plus overlays in `environments/<name>.yaml`. Hooks stay JS, referenced by path. | Base is the topology; overlay is policy. Hooks need code; policy doesn't. |
 | D3 | Environment ownership is recorded in state, not inferred from a name's shape. | The name grammar must relax to allow `prod`; the grammar was the only guard `down` had. |
 | D4 | Every resource in state carries `managed: kraai \| external`. `destroy` deletes only `kraai`-managed resources; `external` is detached, never deleted. | Adoption of existing prod is impossible without it. This is the invariant that makes pointing `kraai` at production safe. |
-| D5 | State lives in the Cloudflare account, in an R2 bucket, using S3 conditional writes for the lock and for CAS on the state object. Local `.kraai/` remains as a fallback backend. | KV has no conditional write and is eventually consistent. A Durable Object works but means shipping a Worker into every customer account; that is the hosted control plane, not the OSS CLI. |
+| D5 | Default state backend is a generic S3-compatible object store — Cloudflare R2, MinIO, AWS S3, Backblaze B2, or anything else speaking the S3 API — authenticated with dedicated storage credentials (access key id + secret access key), never a Cloudflare API token. Conditional writes (`If-Match`/`If-None-Match`) give CAS on the state object and the lock. `local` (`.kraai/`) remains a backend option. | Deriving S3 credentials from a Cloudflare API token locks the default backend to one vendor's account before D16/D18 exist to make that a real choice, and ties storage auth to a tool this generic client shouldn't need to know about. S3-compat is the de facto standard object-storage protocol; a dedicated key pair is the standard way to authenticate to it, on any target. |
 | D6 | CLI verbs become `plan`, `apply`, `destroy`. `up`/`down` stay as aliases for one minor cycle, then go. | Persistent envs need a diff step before mutation. `up` implies create-only. |
 | D7 | `plan` v1 diffs manifest against recorded state only. No live refresh. | Drift detection is deferred, honestly. A refresh that lies is worse than none. |
 | D8 | Per-environment naming policy. Ephemeral keeps `{env}-{service}-{binding}`; persistent envs declare `naming.prefix` (default: env name) and may pin Worker names explicitly. | A real production Worker is named `api`, not `prod-api`. Without this, adoption never matches anything. |
@@ -39,6 +39,8 @@ further primitive or provider an additive module.
 | D15 | The resource model is open-ended by construction: one `ensure()` module plus one schema block per primitive, registered in a table keyed `provider/type` that `plan`/`apply`/`destroy` iterate. Adding a primitive never touches the verbs. | The end state is every Cloudflare hosting feature inside an environment (Vectorize, Workflows, AI Gateway, Images, Stream, Email Routing, Access, zones). A fixed enum would be rewritten at each one. |
 | D16 | Every service carries `provider:`, default `cloudflare`, omitted in every example today. State records `provider` on every resource. Credentials and the state backend are resolved per provider. | AWS, Azure, and GCP follow, BYO account for each. A service belongs to one cloud; resource type names (`d1`, `sqs`) already namespace themselves, so the key is the only schema cost, and it must exist before the first manifest is written by a user. |
 | D17 | Per-resource schemas are generated from each provider's own machine-readable source, never hand-transcribed: wrangler's config JSON Schema and Cloudflare's per-product OpenAPI for `cloudflare`; CloudFormation resource provider schemas (the Cloud Control API surface) for `aws`; `azure-rest-api-specs` OpenAPI for `azure`; Discovery Documents for `gcp`. Every generated schema also accepts `raw:`, merged verbatim into the underlying create/update call, so a field is always representable even before `kraai` gives it a native name. | The ask is Terraform-grade coverage of every option a provider exposes. Hand-authoring that per resource drifts the moment the provider ships a field; generating it from the same source Terraform/Bicep/Cloud Control already use is the only way to keep up, and every major cloud publishes one (verified 2026-09-12: AWS CloudFormation registry schemas + Cloud Control API, Azure's OpenAPI specs feeding Bicep's type system, GCP Discovery Documents feeding `magic-modules`). |
+| D18 | One extension surface for the whole tool, not a separate bespoke registry per layer: a plugin is a module (npm package or local file) declared in `plugins:` that can register providers (D16), resource types (D15), state backends (D5), and middleware, in any combination. Built-ins (the `cloudflare` provider and its resource types, the `s3-compatible` and `local` state backends) are themselves plugin modules, loaded before the project's own `plugins:` list. A later registration for the same key overrides an earlier one; overriding a built-in logs a warning and never fails. | "Pluggable, extendable, overridable" was asked for as a property of the whole tool, not the database layer alone (0.4.0's provider registry) or the cloud layer alone (D16). One registry, one override rule, one entry path — a third-party plugin and an Evatt Labs built-in go through the identical mechanism. |
+| D19 | Lifecycle hooks expand beyond `configure`/`seed`/`open` (which keep their existing, narrower contracts) to named pre/post hooks around every verb and every per-resource operation: `preValidate`, `postValidate`, `prePlan`, `postPlan`, `preApply`, `postApply`, `preResourceApply`, `postResourceApply`, `preDestroy`, `postDestroy`, `preResourceDestroy`, `postResourceDestroy`, `onError`. All optional. Middleware (D18) wraps the same seams for reusable, installable, cross-project concerns; hooks stay this-project-specific. | Full lifecycle coverage was asked for explicitly. Keeping `configure`/`seed`/`open` as their own ergonomic, specific-contract hooks — rather than folding them into generic pre/post pairs — means the common case stays as easy as it is today. |
 
 ## Manifest schema
 
@@ -221,39 +223,48 @@ One state document per environment, JSON, schema-versioned.
 
 ### Backend
 
+Backends are plugins (D18); `s3-compatible` and `local` ship as
+built-ins.
+
 ```
-kraai-state (R2 bucket, created on first apply if absent)
+<bucket>/<prefix>            bucket, prefix, endpoint: backend config
   envs/<name>/state.json     CAS via If-Match: <etag>
   envs/<name>/lock           create via If-None-Match: *
                              body: { holder, startedAt, pid, hostname }
 ```
 
-- R2's S3 API returns `412 Precondition Failed` when `If-Match` /
-  `If-None-Match` conditions fail on PutObject (Cloudflare R2 docs,
-  verified 2026-09-12). This is the same primitive Terraform's S3 backend
-  uses for its native lockfile.
-- Credentials: the S3 API does not take a bearer token. Access Key ID is
-  the API token's `id`; Secret Access Key is `sha256(token value)`
-  (R2 docs, verified 2026-09-12). The token id is available from
-  `GET /user/tokens/verify`. Whether a general-purpose token with
-  `Workers R2 Storage Edit` signs successfully, versus one minted from the
-  R2 dashboard, is unverified: workstream `state-backend-r2` must prove it
-  live before anything depends on it, and fall back to a documented
-  `KRAAI_R2_ACCESS_KEY_ID` / `KRAAI_R2_SECRET_ACCESS_KEY` pair if not.
+- `s3-compatible` speaks plain S3 SigV4 (stdlib `node:crypto`, no AWS
+  SDK) against any endpoint implementing it — Cloudflare R2, MinIO, AWS
+  S3, Backblaze B2, DigitalOcean Spaces, and so on. Config: `endpoint`,
+  `bucket`, `region` (default `auto`), and credentials —
+  `accessKeyId` / `secretAccessKey`, read from
+  `KRAAI_STATE_ACCESS_KEY_ID` / `KRAAI_STATE_SECRET_ACCESS_KEY` when not
+  given inline. These are dedicated storage credentials, never a
+  Cloudflare API token or any other cloud's own identity token — R2's S3
+  API itself needs a key pair minted for that purpose, not an account API
+  token (Cloudflare R2 docs, verified 2026-09-12), and a generic backend
+  can't assume every target even has a notion of "API token."
+- Conditional PutObject (`If-Match` / `If-None-Match`, `412 Precondition
+  Failed` on mismatch) is part of the S3 API itself, not an R2-specific
+  extension — the same primitive Terraform's S3 backend uses for its
+  native lockfile, and why S3-compatible is the default over any single
+  cloud's own storage API.
 - Lock TTL: a lock older than 30 minutes is stale; `apply --force-unlock`
   removes it and says who held it.
-- KV was rejected: its REST write endpoint has no conditional header, and
-  the docs state changes may take up to 60 seconds to become visible.
-- Durable Object was deferred: it needs a Worker deployed into the account.
-  That Worker is the seed of the hosted control plane and belongs to
-  `kraai-api`, not to the CLI.
-- Local backend (`.kraai/<name>.state.json`) stays for offline and for
-  the test suite; an environment declares its backend in the overlay:
-  `state: { backend: r2 | local }`, default `r2` for persistent and for
-  the Action, `local` otherwise.
-- The backend interface is provider-neutral. An AWS provider later adds
-  `s3` on the same SigV4 code path; the state document shape does not
-  change per provider.
+- A Cloudflare-KV-backed option was considered and rejected: its REST
+  write endpoint has no conditional header, and Cloudflare's own docs say
+  changes may take up to 60 seconds to become visible.
+- A Durable-Object-backed option was deferred: it needs a Worker deployed
+  into the account. That Worker is the seed of the hosted control plane
+  and belongs to `kraai-api`, not the OSS CLI — nothing stops it being
+  added later as another `stateBackends` plugin.
+- `local` (`.kraai/<name>.state.json`) stays for offline and the test
+  suite. An environment declares its backend in the overlay:
+  `state: { backend: s3-compatible | local, ...backendConfig }`, default
+  `s3-compatible` for persistent environments and the Action, `local`
+  otherwise.
+- State documents carry no backend-specific fields; swapping backends, or
+  writing a third one as a plugin, never changes the state schema.
 
 ### Ownership invariant
 
@@ -334,17 +345,89 @@ Ensure semantics per resource type (find-or-create by name, adopt by id):
   names against the Cloudflare permissions reference and expand the table
   before shipping. Do not guess them into docs.
 
-## Hooks contract change
+## Plugins, middleware, and lifecycle hooks
+
+### Plugin shape
 
 ```js
+export default {
+  name: "kraai-plugin-example",
+  providers: {                         // extends D16: capability -> vendor -> impl
+    postgres: { neon: neonProvider },
+  },
+  resourceTypes: {                     // extends D15: "provider/type" -> module
+    "cloudflare/vectorize": vectorizeResource,
+  },
+  stateBackends: {                     // extends D5: backend name -> impl
+    "s3-compatible": s3CompatibleBackend,
+  },
+  middleware: [
+    async (ctx, next) => { /* before */ await next(); /* after */ },
+  ],
+};
+```
+
+Declared in `kraai.yaml`:
+
+```yaml
+plugins:
+  - kraai-plugin-example        # resolved as an npm package
+  - ./plugins/cost-guard.mjs    # or a local file, relative to the project root
+```
+
+Every built-in — the `cloudflare` provider and its resource types, the
+`s3-compatible` and `local` state backends — is itself one of these
+plugin objects, loaded before the project's own `plugins:` list. A later
+registration for the same key (capability/vendor pair, `provider/type`
+resource key, or backend name) overrides an earlier one; overriding a
+built-in logs a warning naming the plugin that did it, and never fails
+validation. This is what makes every layer actually overridable, not
+merely extendable in the single direction of "add a new one."
+
+### Middleware
+
+Middleware wraps four seams, Koa-style (`async (ctx, next) => {}`;
+`next()` invokes the next middleware, or the underlying operation if
+there isn't one): `resource.ensure`, `resource.destroy`, `state.read`,
+`state.write`. Declared middleware from every loaded plugin runs in
+`plugins:` array order, outermost first. `ctx` carries
+`{ operation, environment, manifest, resource? }`; a middleware can
+inspect or replace `ctx`, short-circuit by not calling `next()`, or wrap
+the result. Uses: audit logging, cost estimation, policy enforcement
+("no `objects` buckets in `prod` over 10 GiB"), notifications.
+Middleware is the extension point for concerns that don't belong to one
+project's own hooks file — reusable and installable, not project-specific.
+
+### Lifecycle hooks
+
+`hooks: ./kraai.hooks.mjs` (D2) exports any subset of:
+
+```js
+export async function preValidate({ environment }) {}
+export async function postValidate({ environment }) {}
+export async function prePlan({ environment }) {}
+export async function postPlan({ environment, diff }) {}
+export async function preApply({ environment }) {}
+export async function postApply({ environment, result }) {}
+export async function preResourceApply({ environment, resource }) {}
+export async function postResourceApply({ environment, resource, result }) {}
+export async function preDestroy({ environment }) {}
+export async function postDestroy({ environment }) {}
+export async function preResourceDestroy({ environment, resource }) {}
+export async function postResourceDestroy({ environment, resource }) {}
+export async function onError({ environment, error }) {}
+
+// unchanged, specific contracts — still the ergonomic path for the
+// common case, not subsumed into the generic pre/post pairs above:
 export async function configure({ name, urls, subdomain, environment }) {}
 export async function seed({ name, urls, environment, ...provider }) {}
 export function open({ urls, environment }) {}
 ```
 
-`environment` is `{ name, kind, persistent, protected, resources }` where
+All optional; a hooks file implementing none of the new ones behaves
+exactly as a 0.5.0 hooks file does. `environment` is
+`{ name, kind, persistent, protected, resources }` everywhere (D11);
 `resources` mirrors the state document's `services` block after ensure.
-Existing hooks that ignore the new argument keep working.
 
 ## Migration from 0.5.0
 
@@ -354,8 +437,9 @@ Existing hooks that ignore the new argument keep working.
    supported converter beyond that.
 2. `.kraai/<name>.lock.json` (v1) is read by `apply` and upgraded to
    state v2 on the local backend. `apply --env preview --migrate-state`
-   pushes it to R2. `kraai down <name>` keeps working against v1 files
-   until the alias is removed.
+   pushes it to the environment's configured backend (`s3-compatible` by
+   default). `kraai down <name>` keeps working against v1 files until
+   the alias is removed.
 3. The Action's `uses: evatt-labs/kraai@vN` step gains `env: preview` as
    its default and needs no other change from users.
 
@@ -380,16 +464,31 @@ Existing hooks that ignore the new argument keep working.
 
 ## Open questions for review
 
-1. `services` as a map vs today's array. Map is proposed because overlays
-   address services by key. Confirm.
-2. Default backend for persistent envs is `r2`. If the credential path in
-   D5 fails live, the fallback is a second env-var pair. Acceptable?
+1. ~~`services` as a map vs today's array.~~ **Resolved 2026-09-12: map**,
+   keyed by service key.
+2. ~~Default backend for persistent envs is `r2`, with a Cloudflare-token
+   credential path.~~ **Resolved 2026-09-12:** default backend is
+   `s3-compatible` (works against R2, MinIO, AWS S3, B2, ...), always
+   authenticated with dedicated storage credentials, never a Cloudflare
+   API token.
 3. `protected` prompts on `apply`, not only `destroy`, and `destroy` on a
    protected env never takes `--auto-approve`. Confirm.
-5. Worker adoption refuses on undeclared live bindings unless
+4. Worker adoption refuses on undeclared live bindings unless
    `--allow-binding-drop`. Alternative: adopt copies undeclared bindings
    into state as `external` automatically. Proposed: refuse; explicit
    beats inferred for prod.
-4. `gc` reads `ttl` from the overlay at apply time and stores the deadline
+5. `gc` reads `ttl` from the overlay at apply time and stores the deadline
    in state. Alternative: compute at gc time from `updatedAt`. Proposed:
    store the deadline.
+6. D18's override rule is warn-and-replace, never a hard error, even when
+   a plugin overrides a built-in. Alternative: require an explicit
+   `override: true` on the plugin registration, and fail without it.
+   Proposed: warn-and-replace; a hard-fail mode is easy to add later and
+   a strict default punishes the exact "override a built-in" use case
+   this was built for.
+7. Middleware (D19) wraps four seams (`resource.ensure/destroy`,
+   `state.read/write`) but not hook invocation itself. Should middleware
+   also wrap `configure`/`seed`/`open` and the new pre/post hooks?
+   Proposed: not yet — hooks are already project-specific; the seams
+   that need reusable, cross-project wrapping are the ones every project
+   shares regardless of what hooks it writes.
