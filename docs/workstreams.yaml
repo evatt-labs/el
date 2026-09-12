@@ -1,0 +1,390 @@
+# Machine-readable companion to BLUEPRINT.md (Go rewrite). Order is the
+# dependency order. Each workstream is one PR implemented by a Sonnet
+# subagent, reviewed by Jordan before merge, live-smoked where `smoke` is
+# set. Supersedes docs/archive/node-cli/workstreams.yaml entirely.
+#
+# status: proposed | in-progress | done
+# depends: workstream ids that must be merged first
+
+version: 1
+
+workstreams:
+  - id: go-module-scaffold
+    title: Go module, Cobra CLI skeleton, GoReleaser, CI
+    status: proposed
+    depends: []
+    decisions: [D1, D20]
+    scope:
+      - >-
+        `go.mod` (module github.com/evatt-labs/kraai), Go version floor
+        matching current stable minus one.
+      - >-
+        `cmd/kraai/main.go` — thin entrypoint, Cobra root command, no
+        business logic. `internal/cli/` holds command wiring; `internal/`
+        holds everything else per D20.
+      - >-
+        `.goreleaser.yaml`: cross-platform builds, checksums, cosign or
+        GPG signing, GitHub Releases, Homebrew tap.
+      - >-
+        `npm/` — thin postinstall-wrapper package (name `kraai`) that
+        downloads the matching GoReleaser binary; keeps `npx kraai`
+        working. Does not republish the existing JS package's version
+        line; coordinate the npm version bump separately before this ships.
+      - >-
+        CI: `go test ./...`, `go vet`, `golangci-lint` (or similar),
+        coverage upload to the existing codecov integration, on every PR.
+    acceptance:
+      - >-
+        `go build ./...` succeeds; `kraai --help` runs and prints Cobra's
+        generated help with no subcommands wired yet beyond a placeholder.
+      - >-
+        A tagged test release via GoReleaser's `--snapshot` mode produces
+        binaries for at least linux/amd64, linux/arm64, darwin/arm64.
+    smoke: false
+
+  - id: errors-package
+    title: cockroachdb/errors-based error types, exit codes, centralized handler
+    status: proposed
+    depends: [go-module-scaffold]
+    decisions: [D18, D19]
+    scope:
+      - >-
+        `internal/kerrors/`: base error type wrapping `cockroachdb/errors`,
+        one typed error per D19 exit-code bucket (validation, lock-held,
+        confirmation-required), each exposing a fixed `ExitCode()`.
+      - >-
+        `cmd/kraai/main.go`'s single centralized handler: catches the
+        returned error, prints the wrapped-message chain (no stack)
+        normally, the full stack via `%+v` when `KRAAI_DEBUG=1` or
+        `--debug` is set, and calls `os.Exit` with the matched code
+        (default `1` for anything unrecognized).
+      - >-
+        Lint rule or code-review checklist item: no package other than
+        `cmd/kraai` may call `os.Exit`, `fmt.Print*` to stdout/stderr for
+        error presentation, or read `KRAAI_DEBUG` directly.
+    acceptance:
+      - >-
+        Every exit code in D19's table has a test asserting the mapping
+        from error type to process exit code.
+      - >-
+        `KRAAI_DEBUG=1` and `--debug` each independently trigger stack
+        output; neither alone when unset does.
+    smoke: false
+
+  - id: manifest-loader
+    title: Directory-based manifest loader, Jinja2 templating, values precedence
+    status: proposed
+    depends: [errors-package]
+    decisions: [D3, D4, D5]
+    scope:
+      - >-
+        `internal/manifest/`: load `kraai.yaml` + glob `services/*.yaml`
+        (and `.yaml.j2` variants), merge into one resolved manifest.
+      - >-
+        Template rendering (open question 3 in BLUEPRINT.md — pick gonja
+        or pongo2 as part of this workstream, not before) only for
+        `.j2`-suffixed files; render happens before YAML parsing, and the
+        rendered output still goes through full schema validation
+        afterward — a bad render must fail loudly, not silently.
+      - >-
+        `environments/<name>.values.yaml` loaded as free-form data (no
+        schema), `--set key.path=value` CLI flags merged on top with
+        Helm's exact precedence and dotted-path syntax.
+      - >-
+        Unknown keys reject at every level of the *schema-validated* files
+        (`kraai.yaml`, `services/*.yaml`, `environments/*.yaml`), with the
+        failing path in the error. Values files are exempt (D5).
+    acceptance:
+      - >-
+        Every example in BLUEPRINT.md's Manifest schema section parses.
+      - >-
+        A `.j2` file with a template error fails at render time, not
+        silently producing wrong YAML; a rendered-but-schema-invalid
+        result fails validation with the same clear path-based errors as
+        a hand-written file would.
+      - >-
+        `--set` overrides a value from `<name>.values.yaml`, which
+        overrides a template default, in that order, by test.
+    smoke: false
+
+  - id: naming-policy
+    title: Deterministic naming, frozen ephemeral grammar
+    status: proposed
+    depends: [manifest-loader]
+    decisions: [D7, D22]
+    scope:
+      - >-
+        Port `NAME_PATTERN`, `generateEnvironmentName`,
+        `environmentNameForPullRequest`, and `resourceName()` from 0.5.0
+        JS byte-for-byte in behavior (not code) — same regex, same
+        `-pull-request-` infix, same output shape.
+      - >-
+        Persistent name grammar: `/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/`.
+      - >-
+        Import reference resolution: given `resources.<svc>.<type>.<binding>:
+        { id | name }` in an overlay, that's the resource's identity —
+        no further derivation.
+    acceptance:
+      - >-
+        Property-based test (`rapid`) generating environment/service/binding
+        strings, asserting the derived name always matches the frozen
+        pattern and is stable (same inputs, same output, every call).
+      - >-
+        Golden-value tests comparing specific inputs against the exact
+        0.5.0 JS outputs for at least a dozen real examples pulled from
+        that codebase's own test fixtures.
+    smoke: false
+
+  - id: plugin-runtime
+    title: wazero-based WASM plugin loader and registry
+    status: proposed
+    depends: [manifest-loader]
+    decisions: [D16]
+    scope:
+      - >-
+        `internal/plugin/`: load each `plugins:` entry (a `.wasm` file
+        path or a resolvable package reference — resolution mechanism is
+        part of this workstream's design, not assumed) via `wazero`,
+        validate its exported ABI.
+      - >-
+        Registry assembled from built-ins (compiled into the binary, not
+        loaded as plugins) plus the project's own `plugins:` list, in
+        declared order. A later registration for the same provider
+        capability/resource-type key/backend name overrides an earlier
+        one, logging a warning naming the overriding plugin.
+      - >-
+        Host-capability wiring: a documented, minimal set of host
+        functions a WASM plugin may import (e.g. an HTTP-call capability),
+        explicitly granted, never ambient.
+      - >-
+        Answer open question 4 (does "middleware" survive as a distinct
+        concept from "a plugin with hooks") as part of this design, not
+        deferred past it.
+    acceptance:
+      - >-
+        A minimal example WASM plugin (built as part of the test fixtures,
+        any source language) round-trips through load → register → call
+        → produces output visible to the host.
+      - >-
+        A plugin attempting an unwired capability (e.g. raw filesystem
+        access) fails, provably, in a test.
+      - >-
+        A plugin overriding a built-in wins, with a logged warning;
+        removing it restores the built-in.
+    smoke: false
+
+  - id: resource-contract-and-telemetry
+    title: Per-verb Resource interface, registry, OTel decorator, mocks
+    status: proposed
+    depends: [plugin-runtime]
+    decisions: [D15, D17, D21]
+    scope:
+      - >-
+        `internal/resource/`: the `Resource` interface (`Get`/`Create`/
+        `Update`/`Delete`), a `provider/type`-keyed registry combining
+        plugin-runtime's registrations with compiled-in built-ins.
+      - >-
+        Decorator wrapping every registered `Resource` at registration
+        time: an OTel span + duration histogram per verb call, `otelhttp`
+        on the shared HTTP client.
+      - >-
+        `//go:generate` directives + `go.uber.org/mock` for every
+        interface in this package; generated mocks checked in or
+        generated in CI (decide which, document it).
+    acceptance:
+      - >-
+        A fake `Resource` registered, called through the decorator,
+        produces a span and a histogram data point observable via the
+        OTel SDK's in-memory test exporter — no real backend needed for
+        the test.
+      - >-
+        100% coverage on this package, enforced in CI.
+    smoke: false
+
+  - id: lock-and-status
+    title: Per-environment lock and status record, per-provider conditional writes
+    status: proposed
+    depends: [resource-contract-and-telemetry]
+    decisions: [D10, D11]
+    scope:
+      - >-
+        `internal/envstate/` (name deliberately not "state" — this holds
+        no resource inventory): `Lock.Acquire`/`Release`/staleness check,
+        `Status.Write`/`Read`/`List`, one interface, one implementation
+        per provider's native conditional-write primitive (Cloudflare R2
+        first; AWS S3, Azure Blob, GCS stubbed/deferred to their own
+        provider workstreams).
+      - >-
+        SigV4 (and equivalents) via the official `aws-sdk-go-v2` for R2/S3
+        rather than hand-rolled signing.
+    acceptance:
+      - >-
+        Two concurrent `Acquire` calls on the same environment: exactly
+        one succeeds, the other gets the current holder's identity.
+      - >-
+        A lock past the staleness threshold is reclaimable via
+        `--force-unlock`, and the reclaim is logged with the previous
+        holder's identity.
+      - >-
+        `Status.Write` after `Status.Write` (no lock involved, per D11) is
+        a plain last-writer-wins overwrite, by test — confirms no
+        unnecessary CAS complexity was added here.
+    smoke: true
+    smoke_notes: >-
+      Live against a real Cloudflare R2 bucket on the Evatt Labs account.
+
+  - id: cloudflare-provider
+    title: Built-in cloudflare provider — Worker, D1, KV, R2, Queues, Hyperdrive
+    status: proposed
+    depends: [lock-and-status]
+    decisions: [D6, D7, D8, D9]
+    scope:
+      - >-
+        `internal/provider/cloudflare/`: one `Resource` implementation per
+        type, each `Get` doing a live lookup by deterministic name or
+        import reference (never a stored ID), `Create`/`Update`/`Delete`
+        against the Cloudflare API directly (no `wrangler` shell-out for
+        resource CRUD — Worker *deploy* specifically may still need
+        wrangler-equivalent bundling, see verify_first).
+      - >-
+        Per-resource schemas generated from wrangler's config schema /
+        Cloudflare's OpenAPI (D5-equivalent of the archived blueprint's
+        D17), with a `raw:` passthrough.
+    verify_first:
+      - >-
+        Whether Worker deployment (bundling + upload) can be done via the
+        Cloudflare REST API directly with acceptable fidelity, or whether
+        this workstream still needs to shell out to `wrangler` for that
+        one step specifically (acceptable, but confirm before assuming
+        either way — this is a real scope decision, not a detail).
+    acceptance:
+      - >-
+        `Get` on a resource that doesn't exist returns a typed
+        not-found result (not an error) that `plan` interprets as "needs
+        creating."
+      - >-
+        Running the same manifest twice against a live account produces
+        no creates on the second run.
+    smoke: true
+    smoke_notes: >-
+      Full round-trip (create, no-op re-run, update, delete) per resource
+      type against the real Evatt Labs Cloudflare account.
+
+  - id: plan-apply-destroy
+    title: plan / apply / destroy verbs, two-phase execution, protected gating
+    status: proposed
+    depends: [cloudflare-provider]
+    decisions: [D12, D13, D14, D19]
+    scope:
+      - >-
+        `plan`: get-by-identity every declared resource, diff, print,
+        exit per D19's plan-specific convention. Never locks, never mutates.
+      - >-
+        `apply`/`destroy`: acquire lock (lock-and-status), run the
+        two-phase pipeline (phase 1 backing resources concurrently
+        bounded via `errgroup.SetLimit`, phase 2 per-service binder once
+        that service's phase 1 is done), write the status record, release
+        the lock.
+      - >-
+        `protected`/`--confirm-name` per D14, identical rule for both
+        verbs, accepted-and-ignored on non-protected environments.
+      - >-
+        `destroy` deletes every currently-manifest-declared resource
+        including imports (D8) — no special-casing.
+    acceptance:
+      - >-
+        A manifest with 50+ synthetic resources across several services
+        applies with measurably better wall-clock time than a purely
+        sequential baseline, by test/benchmark.
+      - >-
+        `protected` prompts interactively; non-interactively requires
+        `--confirm-name` matching exactly for both `apply` and `destroy`;
+        neither has a bypass flag.
+    smoke: true
+    smoke_notes: >-
+      Persistent `dev`-equivalent environment applied twice, then
+      destroyed, against the real account.
+
+  - id: cli-status-and-gc
+    title: kraai status and kraai gc
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: [D11]
+    scope:
+      - >-
+        `kraai status [<name>]` reading lock-and-status's `Status.Read`/`List`.
+      - >-
+        `kraai gc [--dry-run]`: `ttl` stored as an absolute deadline at
+        apply time, refreshed on every apply; destroys elapsed ephemeral
+        environments only, never persistent ones.
+    acceptance:
+      - >-
+        `gc` never touches a `kind: persistent` environment, by test, even
+        if one somehow carried a `ttl` (which manifest validation should
+        already reject).
+    smoke: true
+
+  - id: github-action-go
+    title: Rewrite the GitHub Action to run the Go binary
+    status: proposed
+    depends: [cli-status-and-gc]
+    decisions: [D1, D14]
+    scope:
+      - >-
+        `action.yml` fetches the matching GoReleaser binary for the
+        runner's platform instead of running `node .../bin/kraai.mjs`.
+      - >-
+        `confirm-name` input passthrough to `--confirm-name` (D14).
+      - >-
+        Preserve existing behavior: refuses `pull_request_target`, sticky
+        PR comment, environment-name derivation from PR context, fork-PR
+        skip.
+    acceptance:
+      - >-
+        `kraai-action-smoke` open/sync/close cycle passes against the
+        rewritten Action.
+    smoke: true
+
+  - id: routes
+    title: Routes and custom domains for persistent environments
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: []
+    verify_first:
+      - >-
+        Exact zone-level API token permissions required, from the
+        Cloudflare permissions reference — do not guess these into docs.
+    scope:
+      - >-
+        Apply `routes` from persistent overlays only; ephemeral overlays
+        with `routes` reject at manifest validation.
+    smoke: true
+
+  - id: containers
+    title: Cloudflare Containers as a resource type
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: []
+    verify_first:
+      - >-
+        Image naming per Worker in the Cloudflare registry, so images can
+        be deleted on destroy.
+    scope:
+      - >-
+        A `containers` resource type in the cloudflare provider, following
+        the same per-verb `Resource` contract as everything else.
+    smoke: true
+
+  - id: aws-provider
+    title: AWS provider surface (then Azure, GCP; BYO account each)
+    status: proposed
+    depends: [containers]
+    decisions: []
+    scope: []
+    acceptance: []
+    smoke: false
+    notes: >-
+      Placeholder; not designed in this cycle. Reuses the same Resource
+      contract, plugin-registry shape, and lock-and-status backend
+      (S3 conditional writes are the native primitive here) with no
+      change to any of those interfaces.
