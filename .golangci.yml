@@ -13,9 +13,36 @@ linters:
   default: standard
   enable:
     - bodyclose
+    - forbidigo
     - gocritic
     - gosec
     - revive
+  settings:
+    forbidigo:
+      # docs/BLUEPRINT.md D18: only cmd/kraai's centralized handler may
+      # call os.Exit, print error output straight to stdout/stderr, or
+      # read env vars. Every other package returns errors instead.
+      #
+      # forbidigo matches a call's selector expression only (e.g.
+      # "os.Getenv"), not its argument literals, so it can't target
+      # `os.Getenv("KRAAI_DEBUG")` specifically without also matching every
+      # other os.Getenv call — verified empirically against this repo's
+      # golangci-lint v2.13.2. Forbidding os.Getenv outright outside
+      # cmd/kraai is the achievable version of "only cmd/kraai reads
+      # KRAAI_DEBUG" and is still correct today (no other package reads any
+      # env var); revisit if a future package legitimately needs one.
+      forbid:
+        - pattern: '^os\.Exit$'
+          msg: "os.Exit is only allowed in cmd/kraai's centralized handler (D18)."
+        - pattern: '^fmt\.Print(f|ln)?$'
+          msg: "fmt.Print/Printf/Println write straight to stdout; only cmd/kraai presents output this way (D18)."
+        - pattern: '^os\.Getenv$'
+          msg: "env vars (KRAAI_DEBUG included) are read only by cmd/kraai's centralized handler (D18/D19)."
+  exclusions:
+    rules:
+      - path: ^cmd/kraai/
+        linters:
+          - forbidigo
 
 formatters:
   enable:
