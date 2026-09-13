@@ -75,17 +75,17 @@ workstreams:
     title: Directory-based manifest loader, Jinja2 templating, values precedence
     status: proposed
     depends: [errors-package]
-    decisions: [D3, D4, D5]
+    decisions: [D3, D4, D5, D25]
     scope:
       - >-
         `internal/manifest/`: load `kraai.yaml` + glob `services/*.yaml`
         (and `.yaml.j2` variants), merge into one resolved manifest.
       - >-
-        Template rendering (open question 3 in BLUEPRINT.md — pick gonja
-        or pongo2 as part of this workstream, not before) only for
-        `.j2`-suffixed files; render happens before YAML parsing, and the
-        rendered output still goes through full schema validation
-        afterward — a bad render must fail loudly, not silently.
+        Template rendering via `flosch/pongo2` v6.1.0 (D25 — decided, no
+        longer a choice inside this workstream) only for `.j2`-suffixed
+        files; render happens before YAML parsing, and the rendered output
+        still goes through full schema validation afterward — a bad render
+        must fail loudly, not silently.
       - >-
         `environments/<name>.values.yaml` loaded as free-form data (no
         schema), `--set key.path=value` CLI flags merged on top with
