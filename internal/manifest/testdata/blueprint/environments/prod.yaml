@@ -1,0 +1,12 @@
+kind: persistent
+protected: true
+naming:
+  prefix: ""
+routes:
+  api:
+    - pattern: api.acme.com
+      custom_domain: true
+resources:
+  api:
+    databases:
+      DB: { id: 0e1f...-uuid }

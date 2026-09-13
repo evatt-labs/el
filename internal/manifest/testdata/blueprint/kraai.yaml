@@ -1,0 +1,11 @@
+version: 1
+
+providers:
+  compute: cloudflare
+  postgres: neon
+
+hooks: ./kraai.hooks.mjs
+
+plugins:
+  - kraai-plugin-example.wasm
+  - ./plugins/cost-guard.wasm
