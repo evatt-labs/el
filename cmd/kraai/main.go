@@ -1,20 +1,51 @@
 // Command kraai is the CLI entrypoint. It stays thin by design (see
 // docs/BLUEPRINT.md D20): all command wiring lives in internal/cli, and all
-// business logic lives deeper under internal/. The centralized error
-// handling and exit-code mapping described in D18/D19 lands with the
-// errors-package workstream; this minimal fallback exists only until then.
+// business logic lives deeper under internal/. This file is also, per D18,
+// the ONLY place in the codebase allowed to call os.Exit, print directly to
+// stdout/stderr for error presentation, or read the KRAAI_DEBUG env var —
+// every other package returns errors and lets this centralized handler
+// decide how to present them and what exit code to use.
 package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/evatt-labs/kraai/internal/cli"
+	"github.com/evatt-labs/kraai/internal/kerrors"
 )
 
 func main() {
-	if err := cli.Execute(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	err := cli.Execute(os.Args[1:])
+	os.Exit(handle(err, cli.DebugRequested(), os.Getenv, os.Stderr))
+}
+
+// handle is main's pure, testable core: given the error Execute produced,
+// whether --debug was set, an env lookup function, and where to print,
+// it prints kraai's error presentation (docs/BLUEPRINT.md D18/D19) and
+// returns the process exit code to use. Splitting this out of main keeps
+// the debug-mode decision and the exit-code mapping unit-testable without
+// capturing os.Stdout/os.Stderr or forking a subprocess.
+func handle(err error, debugFlag bool, getenv func(string) string, stderr io.Writer) int {
+	if err == nil {
+		return 0
 	}
+
+	// Best-effort: if stderr itself is broken there's nothing more useful
+	// to do than still return the right exit code below.
+	if debugRequested(debugFlag, getenv) {
+		_, _ = fmt.Fprintf(stderr, "%+v\n", err)
+	} else {
+		_, _ = fmt.Fprintln(stderr, err)
+	}
+
+	return kerrors.ExitCode(err)
+}
+
+// debugRequested reports whether full error stacks should print: either
+// --debug was passed, or KRAAI_DEBUG=1 is set in the environment. Each
+// triggers it independently (docs/BLUEPRINT.md D19).
+func debugRequested(debugFlag bool, getenv func(string) string) bool {
+	return debugFlag || getenv("KRAAI_DEBUG") == "1"
 }
