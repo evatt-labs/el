@@ -136,41 +136,76 @@ workstreams:
     smoke: false
 
   - id: plugin-runtime
-    title: wazero-based WASM plugin loader and registry
+    title: wazero WASM plugin loader and registry, raw host-function ABI
     status: proposed
     depends: [manifest-loader]
-    decisions: [D16]
+    decisions: [D3, D16, D28, D29]
+    findings:
+      - >-
+        RESEARCHED + BENCHMARKED 2026-09-13; full numbers in BLUEPRINT.md's
+        measurement appendix. ABI decided as D28 (raw wazero host functions
+        over linear memory) — Extism, waPC, WASI-P1 stdio and the Component
+        Model were all evaluated and rejected. The Component Model is not
+        available at all: wazero ships only wasi_snapshot_preview1 and
+        claims Core Spec 1.0/2.0. Extism and waPC were rejected on the
+        staleness of the exact component kraai would import, not on
+        ergonomics.
+      - >-
+        Per-call overhead is 56ns warm — a non-issue. The costs that
+        actually shape this design are compile time (391ms cold for a
+        1.86MB module, linear at ~440ns/byte) and instantiation (2.5ms),
+        not invocation.
     scope:
       - >-
-        `internal/plugin/`: load each `plugins:` entry (a `.wasm` file
-        path or a resolvable package reference — resolution mechanism is
-        part of this workstream's design, not assumed) via `wazero`,
-        validate its exported ABI.
+        `internal/plugin/`: load each `plugins:` entry (a `.wasm` file path
+        or a resolvable package reference — resolution mechanism is part of
+        this workstream's design, not assumed) via `wazero`, validate its
+        exported ABI.
+      - >-
+        D28 ABI: the guest exports an allocation entrypoint plus its
+        capability functions; the host writes arguments into the guest's
+        linear memory and passes (ptr, len), reading results back the same
+        way. Define and document this contract explicitly as the
+        third-party extension surface (D20) — it is a compatibility
+        promise, so version it from the first commit.
+      - >-
+        D29: build the runtime with `wazero.NewCompilationCacheWithDir`,
+        never the in-memory `NewCompilationCache()`, and never
+        compile-per-invocation. Compile once per plugin, then pool
+        instances — module instances are NOT goroutine-safe, and pooling
+        measured 19.2us -> 4.3us going from one instance to sixteen at a
+        16KB payload. Size the pool against D13's global concurrency limit.
       - >-
         Registry assembled from built-ins (compiled into the binary, not
         loaded as plugins) plus the project's own `plugins:` list, in
         declared order. A later registration for the same provider
-        capability/resource-type key/backend name overrides an earlier
-        one, logging a warning naming the overriding plugin.
+        capability/resource-type key/backend name overrides an earlier one,
+        logging a warning naming the overriding plugin.
       - >-
-        Host-capability wiring: a documented, minimal set of host
-        functions a WASM plugin may import (e.g. an HTTP-call capability),
-        explicitly granted, never ambient.
+        Host-capability wiring: a documented, minimal set of host functions
+        a WASM plugin may import (e.g. an HTTP-call capability), explicitly
+        granted, never ambient. Nothing is reachable by default.
       - >-
-        Answer open question 4 (does "middleware" survive as a distinct
+        Answer open question 3 (does "middleware" survive as a distinct
         concept from "a plugin with hooks") as part of this design, not
         deferred past it.
     acceptance:
       - >-
         A minimal example WASM plugin (built as part of the test fixtures,
-        any source language) round-trips through load → register → call
-        → produces output visible to the host.
+        any source language) round-trips through load -> register -> call
+        -> produces output visible to the host.
       - >-
         A plugin attempting an unwired capability (e.g. raw filesystem
         access) fails, provably, in a test.
       - >-
         A plugin overriding a built-in wins, with a logged warning;
         removing it restores the built-in.
+      - >-
+        A benchmark asserts warm per-call overhead stays in the tens of
+        nanoseconds, and a test proves the on-disk compilation cache is
+        actually being hit on a second run rather than silently recompiling
+        (D29's whole point, and the in-memory-cache trap makes a silent
+        regression here easy).
     smoke: false
 
   - id: resource-contract-and-telemetry
