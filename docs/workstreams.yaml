@@ -238,7 +238,7 @@ workstreams:
     title: AWS provider engine (Cloud Control API) + Tier 1 static-site resources
     status: proposed
     depends: [lock-and-status]
-    decisions: [D6, D7, D8, D9, D17, D24]
+    decisions: [D6, D7, D8, D9, D17, D24, D26, D27]
     findings:
       - >-
         VERIFIED 2026-09-13 against the live Evatt Labs account
@@ -270,19 +270,14 @@ workstreams:
         (create/read/delete, no update) must be detected from the schema
         and surfaced as replace-or-fail rather than silently failing an
         update.
-    verify_first:
+    resolved:
       - >-
-        BLOCKING, unresolved — see BLUEPRINT.md open question 5. D7 assumes
-        native resources are found by a deterministic name recomputed every
-        command, with no stored ID. That assumption does NOT hold for over
-        half of the Tier 1 set. Measured `primaryIdentifier` values:
-        name-derivable for S3 Bucket (BucketName), Lambda Function
-        (FunctionName), SSM Parameter (Name), IAM Role (RoleName); but
-        CloudFront Distribution and Route53 HostedZone are `/properties/Id`
-        and ACM Certificate is `/properties/CertificateArn` — server-assigned
-        values that cannot be derived from a manifest path. With D6
-        forbidding a state file there is nowhere to persist them. Resolve
-        before writing any Tier 1 resource code.
+        RESOLVED 2026-09-13 as D26 + D27. D7's derivable-name assumption
+        held for only four of nine measured types, so identity lookup
+        became a per-type declared strategy (`byName` / `byApi` / `byAttr`
+        / `byTag`) rather than one global rule, and provider-assigned ids
+        are held in an identity *cache* — never a record, never a diff
+        source, self-healing on a miss via the type's fallback strategy.
     scope:
       - >-
         `internal/provider/aws/`: one generic `Resource` implementation
@@ -296,6 +291,21 @@ workstreams:
         Diff-to-JSON-Patch emission for `UpdateResource`, and
         schema-driven detection of `createOnlyProperties` /IMMUTABLE types
         so a forced replacement is explicit in `plan` output.
+      - >-
+        Per-type identity strategy per D26, declared on each registry
+        entry: `byName` (S3 BucketName, Lambda FunctionName, SSM Name, IAM
+        RoleName), `byApi` (Route53 `list-hosted-zones-by-name`), `byAttr`
+        (CloudFront `Aliases` — AWS enforces global alias uniqueness),
+        `byTag` (ACM, whose `DomainName` is not unique). A `byTag` type
+        MUST carry its identity tag in the `CreateResource` desired state,
+        never as a follow-up write, or a crash between the two orphans the
+        resource unfindably.
+      - >-
+        Identity cache per D27: manifest path -> assigned id, for
+        `byApi`/`byAttr`/`byTag` types only, never `byName` types. Treat
+        every read as a cache hit that must still be verified by `Get`; on
+        miss or mismatch fall back to the type's D26 strategy and
+        repopulate. It is never a diff source and never stores attributes.
       - >-
         Tier 1 resource types registered: `AWS::S3::Bucket`,
         `AWS::CloudFront::Distribution`, `AWS::CertificateManager::Certificate`,
@@ -450,6 +460,11 @@ workstreams:
     depends: [cli-status-and-gc]
     decisions: [D1, D14]
     scope:
+      - >-
+        Ephemeral environments never commit the D27 identity cache. The
+        Action holds it in the job cache keyed by PR number; a cold cache
+        is correct-but-slower, never wrong, since every entry is
+        re-resolvable via its D26 fallback strategy.
       - >-
         `action.yml` fetches the matching GoReleaser binary for the
         runner's platform instead of running `node .../bin/kraai.mjs`.
