@@ -151,6 +151,63 @@ func TestDecodeStrict_UnknownFieldInSliceElementReportsBracketedPath(t *testing.
 	}
 }
 
+// TestDecodeStrict_DuplicateKeyRejected is a regression test: walking
+// node.Content pairs directly (required to produce real key paths) opts
+// out of go.yaml.in/yaml/v3's own struct-decode duplicate-key detection,
+// so DecodeStrict must replace it rather than silently last-value-wins.
+// Same class of bug mergeServiceFiles already guards against across
+// files — this is the within-one-file/one-mapping case.
+func TestDecodeStrict_DuplicateKeyRejected(t *testing.T) {
+	cases := []struct {
+		name        string
+		data        string
+		newTarget   func() any
+		wantSubstrs []string
+	}{
+		{
+			name:        "duplicate field at struct root",
+			data:        "name: widget\nname: gadget\n",
+			newTarget:   func() any { return &decodeTarget{} },
+			wantSubstrs: []string{"test.yaml", "(root)", `duplicate field "name"`},
+		},
+		{
+			name:        "duplicate key in an arbitrary-key map",
+			data:        "by_key:\n  x: 1\n  x: 2\n",
+			newTarget:   func() any { return &decodeTarget{} },
+			wantSubstrs: []string{"by_key", `duplicate key "x"`},
+		},
+		{
+			// Two levels deep: structs (slice field) -> structs[1] (a
+			// decodeNested struct) -> its own "inner" field repeated.
+			name:        "duplicate field nested two levels deep, inside a slice element",
+			data:        "structs:\n  - inner: one\n  - inner: two\n    inner: three\n",
+			newTarget:   func() any { return &decodeTarget{} },
+			wantSubstrs: []string{"structs[1]", `duplicate field "inner"`},
+		},
+		{
+			// The exact shape mergeServiceFiles guards against across
+			// files (merge_test.go), reproduced within a single file: two
+			// services with the same name under one services: mapping.
+			name:        "two services with the same name in one services file",
+			data:        "services:\n  api:\n    dir: a\n  api:\n    dir: b\n",
+			newTarget:   func() any { return &manifest.ServicesFile{} },
+			wantSubstrs: []string{"services", `duplicate key "api"`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := manifest.DecodeStrict([]byte(tc.data), "test.yaml", tc.newTarget())
+			kerr := requireValidationError(t, err)
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(kerr.Error(), want) {
+					t.Errorf("error %q does not contain %q", kerr.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestDecodeStrict_UntaggedFieldFallsBackToLowercasedName(t *testing.T) {
 	var got decodeTarget
 	err := manifest.DecodeStrict([]byte("notag: hello\n"), "test.yaml", &got)

@@ -21,6 +21,14 @@ import (
 // environments/*.yaml). It never uses map[string]any as an escape hatch:
 // every level of target must be a concrete type from this package.
 //
+// A duplicate key within the same mapping — a struct field or an
+// arbitrary-key map entry repeated at the same level — is also rejected,
+// naming the second occurrence's line and the key path. Walking node.Content
+// pairs directly (rather than decoding through the yaml library's own
+// struct-decode path) is what makes real key paths possible, but it also
+// opts out of the library's own built-in duplicate-key detection; this is
+// that detection's replacement, not an incidental extra.
+//
 // DecodeStrict does not itself decide what's templated — callers render
 // .j2 sources before calling this, per docs/BLUEPRINT.md D5's ordering
 // (render, then parse, then validate).
@@ -93,8 +101,15 @@ func decodeStruct(node *yaml.Node, rv reflect.Value, path, source string) error 
 	}
 
 	fields := structFields(rv.Type())
+	seen := make(map[string]bool, len(node.Content)/2)
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		keyNode, valNode := node.Content[i], node.Content[i+1]
+		if seen[keyNode.Value] {
+			return kerrors.Validation("%s:%d: %s: duplicate field %q",
+				source, keyNode.Line, pathOrRoot(path), keyNode.Value)
+		}
+		seen[keyNode.Value] = true
+
 		fieldIndex, ok := fields[keyNode.Value]
 		if !ok {
 			return kerrors.Validation("%s:%d: %s: unknown field %q",
@@ -121,8 +136,15 @@ func decodeMap(node *yaml.Node, rv reflect.Value, path, source string) error {
 
 	elemType := rv.Type().Elem()
 	result := reflect.MakeMapWithSize(rv.Type(), len(node.Content)/2)
+	seen := make(map[string]bool, len(node.Content)/2)
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		keyNode, valNode := node.Content[i], node.Content[i+1]
+		if seen[keyNode.Value] {
+			return kerrors.Validation("%s:%d: %s: duplicate key %q",
+				source, keyNode.Line, pathOrRoot(path), keyNode.Value)
+		}
+		seen[keyNode.Value] = true
+
 		elem := reflect.New(elemType).Elem()
 		if err := decodeNode(valNode, elem, joinPath(path, keyNode.Value), source); err != nil {
 			return err
