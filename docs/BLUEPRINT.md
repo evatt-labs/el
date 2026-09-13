@@ -56,6 +56,7 @@ itself ships, and structurally faster:
 | D23 | Routes/custom domains apply only from persistent environments, never ephemeral. Cloudflare Containers land after the core rewrite ships, as their own workstream, deferred exactly as before. Azure/GCP providers are a reserved capability but not designed in this cycle. | Unchanged reasoning from the archived blueprint; the rewrite doesn't reopen these. |
 | D24 | **AWS, not Cloudflare, is the first provider built after core scaffolding — and Cloudflare is not used at all for kraai's own SaaS substrate.** `lock-and-status` and `aws-provider` land before `cloudflare-provider`. Once `aws-provider` exists, kraai manages its own production kraai.dev infrastructure (kraai-api/kraai-web) live, on AWS, using minimal-cost AWS primitives (specific services — Lambda vs Fargate vs EC2, RDS vs keeping Neon — are a separate architecture decision for kraai-api's own blueprint, not this document). | Explicit: "nobody's gonna look twice if i'm using cloudflare. aws has to be the first poster child." A tool that only proves itself on the cloud it originated from doesn't demonstrate real multi-cloud capability to a skeptical audience; running kraai's own production infrastructure on AWS via kraai itself does. |
 
+| D25 | Template engine is `flosch/pongo2` (v6.1.0), not `noirbizarre/gonja`. D5's "Jinja2-style" stands as the *intent*; pongo2's Django syntax is the implementation. | Resolves open question 3 by checking rather than assuming: gonja's default branch has not moved since 2020-06-29 (no releases, 152 stars) — it fails D3's "actively-maintained" bar outright. pongo2 is actively developed (last commit 2026-03-13, v6.1.0 released 2026-05-02, 3k stars, MIT). Jinja2 was itself modeled on Django templates, so `{{ var }}`, `{% if %}`, `{% for %}`, `{% extends %}` and `|filters` all carry over; the divergence is at the margins (macros, `{% set %}` semantics, richer expressions). A dead dependency owning the template layer is the larger risk. |
 ## Manifest schema
 
 ### `kraai.yaml` (root, required)
@@ -154,10 +155,68 @@ D17; unchanged by the language rewrite.)
 - A "complete mode" / prune-everything-undeclared verb — worth revisiting once Azure's own replacement for ARM's deprecated Complete mode (Deployment Stacks) has actually been read, not assumed.
 - Cross-service resource wiring (unchanged limitation from 0.5.0).
 
+## Compliance positioning (direction, not a decision)
+
+Recorded 2026-09-13 as a candidate product direction. Nothing here is
+decided, and nothing on the current workstream path depends on it — golden
+manifests are still just manifests, and need `manifest-loader`,
+`aws-provider` and `plan-apply-destroy` to exist regardless.
+
+The idea: ship **HIPAA/HITRUST-controlled environments as golden manifests**
+(pre-built, compliance-controlled environment definitions) plus auditable
+evidence reporting.
+
+Why it fits this architecture specifically, rather than being a generic
+compliance bolt-on:
+
+- **D6 is the feature.** Terraform's state is a derived artifact that can
+  drift from both config and reality; asked to prove a resource's
+  configuration on a given date, it can only offer a state file that was
+  hopefully accurate. kraai's manifest lives in git — reviewed, PR'd,
+  commit-timestamped, signable — so the manifest *is* the control
+  document, and `apply` overwriting drift unconditionally means a control
+  is enforced rather than asserted.
+- **D11 already carries `manifestHash`.** Which exact manifest was applied,
+  when, by whom, with what result. Specified for `kraai status`; it is also
+  an audit trail.
+- **D17** (schemas generated from each provider's own machine-readable
+  source) means control mappings can be validated against real provider
+  schemas instead of hand-maintained.
+- **Different verb from the incumbents.** Vanta/Drata/Secureframe audit an
+  environment after it exists and report non-compliance. Provisioning a
+  compliant environment by construction is a different product.
+
+Two guardrails that belong in the docs from day one if this is ever built,
+not retrofitted:
+
+1. **Scope honesty.** kraai can only ever address technical safeguards that
+   map to resource configuration — realistically a minority of any full
+   control set. BAAs, workforce training, access reviews, incident
+   response and physical security are not manifests. Overclaiming coverage
+   converts a product into a liability.
+2. **Evidence, never certification.** kraai produces artifacts for an
+   auditor to evaluate. It does not certify compliance. The distinction is
+   legally load-bearing.
+
+Licensing, checked 2026-09-13: the **HIPAA Security Rule is 45 CFR Part 164**,
+US federal regulation and public domain — technical-safeguard manifests can
+ship in an MIT repo freely. The **HITRUST CSF is proprietary** (14 control
+categories, 49 objectives, 156 control specifications, licensed from
+HITRUST Alliance, updated annually). Redistribution terms for the control
+text are not public; shipping CSF requirement text would need a real legal
+review first. The safe shape is to map by control *identifier* only and let
+licensed customers correlate on their side.
+
+This direction would also answer the hosted-tier question that D6 left
+open (the SaaS's original headline was "hosted state," which no longer has
+a referent): the OSS CLI applies golden manifests, while a hosted tier
+holds the evidence archive, attestation history and cross-environment
+control view — evidence *retention* being the thing enterprises pay for and
+will not self-host.
+
 ## Open questions for review
 
 1. **Vendor-neutral manifest vocabulary** (`databases`/`keyvalue`/`objects`/`queues`, `providers: { compute, postgres }`) was designed during the archived JS-era session and is carried into this document's examples as-is. It was never re-confirmed specifically for the Go rewrite. Still the direction, or revisit now that the underlying engine has changed?
 2. **Hooks language/runtime.** The archived design assumed JS hooks (`kraai.hooks.mjs`) because the engine itself was JS. In Go, what runs a hook — compiled into a WASM plugin (D16) like everything else, or a separate, simpler mechanism (e.g. a small embedded scripting language) for the common `configure`/`seed`/`open` case specifically, so a hook author doesn't need a full plugin toolchain for three functions?
-3. **Jinja2 engine, final pick**: `noirbizarre/gonja` (literal Jinja syntax, maintenance cadence unconfirmed) vs `flosch/pongo2` (Django syntax, more actively developed, now v7). Worth a closer look at gonja's actual commit history before committing.
-4. **Lifecycle hooks + middleware** (the archived blueprint's D19/D18 — expanded pre/post hooks around validate/plan/apply/destroy, plus middleware wrapping `resource.ensure`/`state.read/write`) were designed pre-pivot and never re-derived for the WASM plugin model. Does "middleware" still mean something distinct from "a plugin with hooks" once plugins are WASM, or do they collapse into one concept?
-5. **Migration story for existing 0.5.0 users.** Nothing decided yet on how a `kraai.config.mjs` user gets to the Go rewrite's manifest-directory format — manual only, a one-time `kraai init` best-effort converter, or something else.
+3. **Lifecycle hooks + middleware** (the archived blueprint's D19/D18 — expanded pre/post hooks around validate/plan/apply/destroy, plus middleware wrapping `resource.ensure`/`state.read/write`) were designed pre-pivot and never re-derived for the WASM plugin model. Does "middleware" still mean something distinct from "a plugin with hooks" once plugins are WASM, or do they collapse into one concept?
+4. **Migration story for existing 0.5.0 users.** Nothing decided yet on how a `kraai.config.mjs` user gets to the Go rewrite's manifest-directory format — manual only, a one-time `kraai init` best-effort converter, or something else.
