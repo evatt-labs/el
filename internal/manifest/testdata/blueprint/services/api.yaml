@@ -1,0 +1,9 @@
+services:
+  api:
+    dir: packages/api
+    databases:
+      - { binding: DB, engine: sqlite }
+      - { binding: PG, engine: postgres, caching: { disabled: false, maxAge: 60 } }
+    keyvalue: [{ binding: CACHE }]
+    objects:  [{ binding: ASSETS }]
+    queues:   [{ binding: JOBS, consumer: true }]
