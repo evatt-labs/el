@@ -164,6 +164,49 @@ func TestKError_StdlibUnwrapCompatible(t *testing.T) {
 	}
 }
 
+// doThingReturningError mimics the idiomatic tail-return pattern a real
+// caller would use: `return kerrors.Wrap(cause, ...)` from a function
+// declared to return the error interface. This is exactly the shape that
+// exposes Go's typed-nil trap if Wrap's return type were *KError instead
+// of error — see TestWrap_TailReturnedNilCauseIsGenuinelyNil.
+func doThingReturningError(cause error) error {
+	return kerrors.Wrap(cause, kerrors.CodeValidation, "while doing thing")
+}
+
+// TestWrap_TailReturnedNilCauseIsGenuinelyNil is a regression test for a
+// typed-nil bug: Wrap must return the error interface (not *KError) so
+// that wrapping a nil cause and returning it through an error-typed
+// function produces a truly nil error, not a non-nil interface holding a
+// nil *KError. Before the fix, `err != nil` below was true even though
+// there was no real error, and both kerrors.ExitCode(err) and printing
+// err then panicked on the nil *KError receiver.
+func TestWrap_TailReturnedNilCauseIsGenuinelyNil(t *testing.T) {
+	err := doThingReturningError(nil)
+
+	if err != nil {
+		t.Fatalf("doThingReturningError(nil) = %#v, want a genuinely nil error", err)
+	}
+}
+
+func TestWrap_TailReturnedNilCause_ExitCodeDoesNotPanic(t *testing.T) {
+	err := doThingReturningError(nil)
+
+	if got := kerrors.ExitCode(err); got != 0 {
+		t.Errorf("ExitCode(doThingReturningError(nil)) = %d, want 0", got)
+	}
+}
+
+func TestWrap_TailReturnedNilCause_FormattingDoesNotPanic(t *testing.T) {
+	err := doThingReturningError(nil)
+
+	if got, want := fmt.Sprintf("%v", err), "<nil>"; got != want {
+		t.Errorf("%%v of doThingReturningError(nil) = %q, want %q", got, want)
+	}
+	if got, want := fmt.Sprintf("%+v", err), "<nil>"; got != want {
+		t.Errorf("%%+v of doThingReturningError(nil) = %q, want %q", got, want)
+	}
+}
+
 func TestWrap_NilCauseReturnsNil(t *testing.T) {
 	kerr := kerrors.Wrap(nil, kerrors.CodeValidation, "should not build")
 	if kerr != nil {

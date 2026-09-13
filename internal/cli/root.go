@@ -14,6 +14,14 @@ import (
 // DebugRequested. NewRootCommand resets it to false on every call, so
 // repeated Execute calls (as in tests) never see a stale value from a
 // previous run.
+//
+// HAZARD: this reset-on-call approach is only safe for sequential Execute
+// calls. It is NOT safe under t.Parallel() — concurrent Execute calls
+// would race on this var (one goroutine's reset/parse clobbering
+// another's). If a future command test suite runs command tests in
+// parallel, debugFlag needs to move off a package-level var (e.g. into a
+// value threaded through Execute/DebugRequested, or a per-call struct)
+// before that lands.
 var debugFlag bool
 
 // NewRootCommand builds the kraai root command. Subsequent workstreams add

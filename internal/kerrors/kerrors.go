@@ -20,18 +20,21 @@ import (
 // CI-branchable on purpose, not one code per Go error type.
 type Code int
 
+// Values are explicit, not iota-derived: docs/BLUEPRINT.md D19's exit-code
+// table is a documented public CI contract, so inserting a new Code
+// between existing ones must never silently shift a downstream exit code.
 const (
 	// CodeUnexpected is the fallback bucket for generic/unrecognized
 	// errors, including any error that isn't a *KError at all.
-	CodeUnexpected Code = iota + 1
+	CodeUnexpected Code = 1
 	// CodeValidation marks a manifest/input/config validation failure.
-	CodeValidation
+	CodeValidation Code = 2
 	// CodeLockHeld marks a failure to acquire an environment lock because
 	// another operation already holds it.
-	CodeLockHeld
+	CodeLockHeld Code = 3
 	// CodeConfirmationRequired marks a protected operation whose required
 	// confirmation was missing or didn't match.
-	CodeConfirmationRequired
+	CodeConfirmationRequired Code = 4
 )
 
 // ExitCode returns the process exit code for c, per docs/BLUEPRINT.md D19.
@@ -115,7 +118,17 @@ func New(format string, args ...any) *KError {
 // outside kraai (a cloud SDK error, an os error, etc). If cause is nil,
 // Wrap returns nil, matching the fmt.Errorf/errors.Wrap convention of
 // being a no-op wrapper around a non-error.
-func Wrap(cause error, code Code, format string, args ...any) *KError {
+//
+// Wrap returns the error interface, not *KError, deliberately: a *KError
+// return type would make Wrap(nil, ...) a classic Go typed-nil trap — a
+// caller doing `return kerrors.Wrap(cause, ...)` from a function returning
+// error would get back a non-nil error interface holding a nil *KError,
+// and both ExitCode() and Error() would then panic on the nil receiver.
+// Returning error here means the nil case below converts to a true nil
+// interface. The other constructors below never return nil, so they keep
+// *KError, which lets callers reach Code()/ExitCode() without a type
+// assertion.
+func Wrap(cause error, code Code, format string, args ...any) error {
 	if cause == nil {
 		return nil
 	}
