@@ -13,7 +13,8 @@ import (
 )
 
 func newRealLoader(root string) *manifest.Loader {
-	return manifest.NewLoader(manifest.NewFS(root), manifest.NewTemplateEngine())
+	fsys := manifest.NewFS(root)
+	return manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 }
 
 // TestLoad_BlueprintExamplesParse is acceptance criterion 1: every example
@@ -273,7 +274,7 @@ func TestLoad_WrongVersionIsValidationError(t *testing.T) {
 	fsys.EXPECT().ReadFile("kraai.yaml").Return([]byte("version: 2\n"), nil)
 	fsys.EXPECT().ReadFile("kraai.yaml.j2").Return(nil, fsNotExistErr("kraai.yaml.j2"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "version") {
@@ -288,7 +289,7 @@ func TestLoad_TemplateRootReadErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().ReadFile("kraai.yaml").Return(nil, fsNotExistErr("kraai.yaml"))
 	fsys.EXPECT().ReadFile("kraai.yaml.j2").Return(nil, errors.New("disk on fire"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -302,7 +303,7 @@ func TestLoad_ServicesTemplateGlobErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().Glob("services/*.yaml").Return(nil, nil)
 	fsys.EXPECT().Glob("services/*.yaml.j2").Return(nil, errors.New("glob exploded"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -325,7 +326,7 @@ func TestLoad_ServicesGlobErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().ReadFile("kraai.yaml.j2").Return(nil, fsNotExistErr("kraai.yaml.j2"))
 	fsys.EXPECT().Glob("services/*.yaml").Return(nil, errors.New("glob exploded"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -340,7 +341,7 @@ func TestLoad_ServicesReadFileErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().Glob("services/*.yaml.j2").Return(nil, nil)
 	fsys.EXPECT().ReadFile("services/api.yaml").Return(nil, errors.New("disk on fire"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -355,7 +356,7 @@ func TestLoad_ServicesTemplateReadFileErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().Glob("services/*.yaml.j2").Return([]string{"services/api.yaml.j2"}, nil)
 	fsys.EXPECT().ReadFile("services/api.yaml.j2").Return(nil, errors.New("disk on fire"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -389,7 +390,7 @@ func TestLoad_EnvironmentReadErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().Glob("services/*.yaml.j2").Return(nil, nil)
 	fsys.EXPECT().ReadFile("environments/dev.yaml").Return(nil, errors.New("disk on fire"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
@@ -400,7 +401,7 @@ func TestLoad_RootReadErrorIsWrapped(t *testing.T) {
 	fsys.EXPECT().ReadFile("environments/dev.values.yaml").Return(nil, fsNotExistErr("environments/dev.values.yaml"))
 	fsys.EXPECT().ReadFile("kraai.yaml").Return(nil, errors.New("disk on fire"))
 
-	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine())
+	loader := manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }

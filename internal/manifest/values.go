@@ -23,6 +23,14 @@ import (
 // filter supplies the third, lowest tier whenever a key this map doesn't
 // have is referenced in a template.
 func LoadValues(fsys FS, envName string, setArgs []string) (map[string]any, error) {
+	// envName is assumed already validated against D22's persistent-name
+	// grammar (or the frozen ephemeral grammar) by the naming-policy
+	// workstream, not yet implemented — this package only ever joins it
+	// into a path. os.DirFS + io/fs path validation already reject a
+	// traversal attempt outright (fs.ErrNotExist, not a filesystem escape),
+	// but an unvalidated name can still surface a raw io/fs error instead
+	// of a clean validation message, or silently resolve to empty values
+	// for a name that should itself be rejected (e.g. "..", "a/b").
 	path := "environments/" + envName + ".values.yaml"
 
 	values := map[string]any{}
