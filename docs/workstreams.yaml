@@ -234,25 +234,75 @@ workstreams:
       kraai SaaS substrate (D24) — this is the same account/bucket the
       dogfooding work eventually depends on, not a disposable fixture.
 
-  - id: aws-provider
-    title: Built-in AWS provider — the first POC provider (D24)
+  - id: aws-provider-core
+    title: AWS provider engine (Cloud Control API) + Tier 1 static-site resources
     status: proposed
     depends: [lock-and-status]
-    decisions: [D6, D7, D8, D9, D24]
+    decisions: [D6, D7, D8, D9, D17, D24]
+    findings:
+      - >-
+        VERIFIED 2026-09-13 against the live Evatt Labs account
+        (409032463870, us-east-1): D17's assumption holds. Every resource
+        type kraai needs has a machine-readable CloudFormation resource
+        provider schema via `cloudformation describe-type`, each carrying
+        `properties`, `required`, `primaryIdentifier`, `createOnlyProperties`
+        and per-verb `handlers` (create/read/update/delete/list). Schema
+        sizes range 3KB (ACM Certificate) to 116KB (CloudFront
+        Distribution). `createOnlyProperties` is directly useful to `plan`:
+        it is the authoritative per-property answer to "does changing this
+        force a replacement."
+      - >-
+        VERIFIED 2026-09-13: the **Cloud Control API** exposes uniform
+        Get/Create/Update/Delete/List across **1,598 FULLY_MUTABLE public
+        resource types**, and read-only `list-resources` probes succeeded
+        for every Tier 1 and Tier 2 type below. This maps 1:1 onto D15's
+        per-verb `Resource` interface. Consequence: this workstream builds
+        ONE generic Cloud Control-backed `Resource` implementation driven
+        by the fetched schema, NOT "one implementation per AWS primitive"
+        as the superseded version of this entry said. Per-type work
+        collapses to a registry entry plus schema-derived validation.
+      - >-
+        Real costs of the Cloud Control route, to design for rather than
+        discover: it is asynchronous (operations return a ProgressEvent
+        that must be polled to completion); `UpdateResource` takes a JSON
+        Patch document, not a whole desired-state object, so the diff
+        engine must emit patches; and IMMUTABLE-provisioning types
+        (create/read/delete, no update) must be detected from the schema
+        and surfaced as replace-or-fail rather than silently failing an
+        update.
+    verify_first:
+      - >-
+        BLOCKING, unresolved — see BLUEPRINT.md open question 5. D7 assumes
+        native resources are found by a deterministic name recomputed every
+        command, with no stored ID. That assumption does NOT hold for over
+        half of the Tier 1 set. Measured `primaryIdentifier` values:
+        name-derivable for S3 Bucket (BucketName), Lambda Function
+        (FunctionName), SSM Parameter (Name), IAM Role (RoleName); but
+        CloudFront Distribution and Route53 HostedZone are `/properties/Id`
+        and ACM Certificate is `/properties/CertificateArn` — server-assigned
+        values that cannot be derived from a manifest path. With D6
+        forbidding a state file there is nowhere to persist them. Resolve
+        before writing any Tier 1 resource code.
     scope:
       - >-
-        `internal/provider/aws/`: one `Resource` implementation per AWS
-        primitive needed to host the kraai SaaS substrate itself — exact
-        set (Lambda vs Fargate vs EC2, S3, RDS/keep-Neon, API Gateway,
-        etc.) is a separate architecture decision for kraai-api's own
-        blueprint, not decided here; this workstream builds whatever that
-        decision settles on, via `aws-sdk-go-v2`, each `Get` doing a live
-        lookup by deterministic name or import reference (never a stored
-        ID), per D7.
+        `internal/provider/aws/`: one generic `Resource` implementation
+        backed by Cloud Control API, driven by CloudFormation resource
+        provider schemas fetched/vendored per D17 (never hand-transcribed),
+        with a `raw:` passthrough for properties kraai does not model.
       - >-
-        Per-resource schemas generated from CloudFormation resource
-        provider schemas (the Cloud Control API surface) per the archived
-        blueprint's D17, with a `raw:` passthrough.
+        Async operation handling: submit, poll the ProgressEvent to a
+        terminal state, map failure reasons onto `kerrors` buckets.
+      - >-
+        Diff-to-JSON-Patch emission for `UpdateResource`, and
+        schema-driven detection of `createOnlyProperties` /IMMUTABLE types
+        so a forced replacement is explicit in `plan` output.
+      - >-
+        Tier 1 resource types registered: `AWS::S3::Bucket`,
+        `AWS::CloudFront::Distribution`, `AWS::CertificateManager::Certificate`,
+        `AWS::Route53::HostedZone`, `AWS::Route53::RecordSet`. This set is
+        deliberately the subset that is needed in EVERY future for kraai.dev
+        — full SaaS, OSS docs site, or a bare landing page — so it is
+        buildable while the business model stays undecided.
     acceptance:
       - >-
         `Get` on a resource that doesn't exist returns a typed
@@ -261,12 +311,48 @@ workstreams:
       - >-
         Running the same manifest twice against a live account produces
         no creates on the second run.
+      - >-
+        A change to a `createOnlyProperties` field is reported by `plan` as
+        a replacement, not an in-place update.
     smoke: true
     smoke_notes: >-
       Full round-trip (create, no-op re-run, update, delete) per resource
-      type against the real AWS account hosting kraai's own SaaS substrate
-      — this is dogfooding on production-intended infrastructure, not a
-      disposable fixture; treat accordingly (protected: true from day one).
+      type against the real AWS account. The dogfood milestone for this
+      workstream is kraai deploying kraai.dev's own static site end to end
+      — production-intended infrastructure, not a disposable fixture, so
+      `protected: true` from day one.
+
+  - id: aws-provider-compute
+    title: AWS provider Tier 2 — Lambda/API resources (only if kraai-api exists)
+    status: proposed
+    depends: [aws-provider-core]
+    decisions: [D24]
+    scope:
+      - >-
+        Register Tier 2 resource types on the generic engine built in
+        `aws-provider-core`: `AWS::Lambda::Function`, `AWS::Lambda::Url`,
+        `AWS::IAM::Role`, `AWS::SSM::Parameter`,
+        `AWS::Events::Rule`/Scheduler. No new engine work — per-type
+        registration plus schema-derived validation only.
+      - >-
+        Lambda artifact packaging: zip plus the Lambda Web Adapter layer
+        (runs an unmodified FastAPI ASGI app, so a later move to Fargate is
+        a repackage rather than a rewrite), not a container image — no ECR
+        cost, faster cold start.
+    blocked_on: >-
+      Whether kraai.dev has a hosted API at all. The business model is
+      explicitly undecided as of 2026-09-13; kraai may reduce to an OSS
+      product site, in which case this workstream is never built. Nothing
+      else depends on it.
+    acceptance:
+      - >-
+        Same two acceptance criteria as aws-provider-core, for the Tier 2
+        types.
+    smoke: true
+    smoke_notes: >-
+      Only meaningful once kraai-api exists. kraai-api/docs/BLUEPRINT.md is
+      stale and parked (it still documents Cloudflare Containers) — do not
+      build against it without revising it first.
 
   - id: cloudflare-provider
     title: Built-in cloudflare provider — Worker, D1, KV, R2, Queues, Hyperdrive
@@ -307,7 +393,7 @@ workstreams:
   - id: plan-apply-destroy
     title: plan / apply / destroy verbs, two-phase execution, protected gating
     status: proposed
-    depends: [aws-provider]
+    depends: [aws-provider-core]
     decisions: [D12, D13, D14, D19]
     scope:
       - >-
