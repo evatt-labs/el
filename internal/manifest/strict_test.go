@@ -39,6 +39,19 @@ func mustNotError(t *testing.T, err error) {
 	}
 }
 
+// mustNewFS builds a real, symlink-contained FS rooted at root (relative
+// to the internal/manifest package directory, i.e. a testdata/... path),
+// failing the test immediately if root can't be opened — shared by every
+// test file that exercises the real filesystem instead of MockFS.
+func mustNewFS(t *testing.T, root string) manifest.FS {
+	t.Helper()
+	fsys, err := manifest.NewFS(root)
+	if err != nil {
+		t.Fatalf("manifest.NewFS(%q): %v", root, err)
+	}
+	return fsys
+}
+
 func requireValidationError(t *testing.T, err error) *kerrors.KError {
 	t.Helper()
 	if err == nil {

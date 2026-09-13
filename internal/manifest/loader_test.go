@@ -12,8 +12,9 @@ import (
 	"github.com/evatt-labs/kraai/internal/manifest"
 )
 
-func newRealLoader(root string) *manifest.Loader {
-	fsys := manifest.NewFS(root)
+func newRealLoader(t *testing.T, root string) *manifest.Loader {
+	t.Helper()
+	fsys := mustNewFS(t, root)
 	return manifest.NewLoader(fsys, manifest.NewTemplateEngine(fsys))
 }
 
@@ -21,7 +22,7 @@ func newRealLoader(root string) *manifest.Loader {
 // in docs/BLUEPRINT.md's "Manifest schema" section, copied verbatim into
 // testdata/blueprint/, must parse into a fully resolved Manifest.
 func TestLoad_BlueprintExamplesParse(t *testing.T) {
-	loader := newRealLoader("testdata/blueprint")
+	loader := newRealLoader(t, "testdata/blueprint")
 
 	got, err := loader.Load("prod", nil)
 	if err != nil {
@@ -118,7 +119,7 @@ func requireCode(t *testing.T, err error, code kerrors.Code) *kerrors.KError {
 // not silently produce broken YAML that then fails (or worse, passes)
 // schema validation.
 func TestLoad_TemplateRenderErrorFailsLoudly(t *testing.T) {
-	loader := newRealLoader("testdata/render-error")
+	loader := newRealLoader(t, "testdata/render-error")
 
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
@@ -132,7 +133,7 @@ func TestLoad_TemplateRenderErrorFailsLoudly(t *testing.T) {
 // produces a document with an unknown field must fail with the same
 // path-based error a hand-written file would produce.
 func TestLoad_RenderedButSchemaInvalidFailsValidation(t *testing.T) {
-	loader := newRealLoader("testdata/schema-invalid-after-render")
+	loader := newRealLoader(t, "testdata/schema-invalid-after-render")
 
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
@@ -145,7 +146,7 @@ func TestLoad_RenderedButSchemaInvalidFailsValidation(t *testing.T) {
 // criterion 3: --set beats the values file, which beats a template's own
 // default, in that order.
 func TestLoad_SetOverridesValuesOverridesTemplateDefault(t *testing.T) {
-	loader := newRealLoader("testdata/precedence")
+	loader := newRealLoader(t, "testdata/precedence")
 
 	t.Run("template default when neither values nor --set supply it", func(t *testing.T) {
 		got, err := loader.Load("nodev", nil)
@@ -183,7 +184,7 @@ func TestLoad_SetOverridesValuesOverridesTemplateDefault(t *testing.T) {
 // (not a services file) renders successfully but the result has an
 // unknown field.
 func TestLoad_RootTemplateRendersButFailsSchema(t *testing.T) {
-	loader := newRealLoader("testdata/root-template-schema-invalid")
+	loader := newRealLoader(t, "testdata/root-template-schema-invalid")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "unknown field \"bogus\"") {
@@ -196,7 +197,7 @@ func TestLoad_RootTemplateRendersButFailsSchema(t *testing.T) {
 // the success path alongside the render/schema failure paths covered
 // elsewhere.
 func TestLoad_TemplatedServiceRendersSuccessfully(t *testing.T) {
-	loader := newRealLoader("testdata/templated-service")
+	loader := newRealLoader(t, "testdata/templated-service")
 	got, err := loader.Load("dev", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -208,13 +209,13 @@ func TestLoad_TemplatedServiceRendersSuccessfully(t *testing.T) {
 }
 
 func TestLoad_MissingRootIsValidationError(t *testing.T) {
-	loader := newRealLoader("testdata/missing-root")
+	loader := newRealLoader(t, "testdata/missing-root")
 	_, err := loader.Load("dev", nil)
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
 func TestLoad_BothRootFilesIsValidationError(t *testing.T) {
-	loader := newRealLoader("testdata/both-root")
+	loader := newRealLoader(t, "testdata/both-root")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "kraai.yaml") || !strings.Contains(kerr.Error(), "kraai.yaml.j2") {
@@ -223,7 +224,7 @@ func TestLoad_BothRootFilesIsValidationError(t *testing.T) {
 }
 
 func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
-	loader := newRealLoader("testdata/unknown-key")
+	loader := newRealLoader(t, "testdata/unknown-key")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "unknown field \"bogus\"") {
@@ -232,7 +233,7 @@ func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
 }
 
 func TestLoad_UnknownNestedKeyRejectedWithPath(t *testing.T) {
-	loader := newRealLoader("testdata/unknown-nested-key")
+	loader := newRealLoader(t, "testdata/unknown-nested-key")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "services.api.databases[1].caching: unknown field \"maxage\"") {
@@ -241,7 +242,7 @@ func TestLoad_UnknownNestedKeyRejectedWithPath(t *testing.T) {
 }
 
 func TestLoad_DuplicateServiceAcrossFilesIsValidationError(t *testing.T) {
-	loader := newRealLoader("testdata/duplicate-service")
+	loader := newRealLoader(t, "testdata/duplicate-service")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "api") {
@@ -250,7 +251,7 @@ func TestLoad_DuplicateServiceAcrossFilesIsValidationError(t *testing.T) {
 }
 
 func TestLoad_MissingEnvironmentIsValidationError(t *testing.T) {
-	loader := newRealLoader("testdata/missing-environment")
+	loader := newRealLoader(t, "testdata/missing-environment")
 	_, err := loader.Load("nope", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "nope") {
@@ -259,7 +260,7 @@ func TestLoad_MissingEnvironmentIsValidationError(t *testing.T) {
 }
 
 func TestLoad_BadKindIsValidationError(t *testing.T) {
-	loader := newRealLoader("testdata/bad-kind")
+	loader := newRealLoader(t, "testdata/bad-kind")
 	_, err := loader.Load("dev", nil)
 	kerr := requireCode(t, err, kerrors.CodeValidation)
 	if !strings.Contains(kerr.Error(), "kind") {
@@ -309,7 +310,7 @@ func TestLoad_ServicesTemplateGlobErrorIsWrapped(t *testing.T) {
 }
 
 func TestLoad_BadSetArgPropagates(t *testing.T) {
-	loader := newRealLoader("testdata/blueprint")
+	loader := newRealLoader(t, "testdata/blueprint")
 	_, err := loader.Load("prod", []string{"nopequals"})
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
