@@ -12,8 +12,9 @@ The existing npm package (`kraai`, currently 0.5.x) is JavaScript/Node
 and lives at [`legacy-node/`](legacy-node/) now — frozen as the legacy
 line during the rewrite, not under active feature development. See
 [`legacy-node/README.md`](legacy-node/README.md) for its own
-documentation, and [`docs/archive/node-cli/`](docs/archive/node-cli/)
-for the design history that produced it.
+documentation. The design history that produced it lived at
+`docs/archive/node-cli/` and was removed once the rewrite's own blueprint
+superseded it; `git log -- docs/archive/node-cli` still has it.
 
 ## Contributing to the rewrite
 

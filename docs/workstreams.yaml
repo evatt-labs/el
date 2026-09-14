@@ -1,7 +1,8 @@
 # Machine-readable companion to BLUEPRINT.md (Go rewrite). Order is the
 # dependency order. Each workstream is one PR implemented by a Sonnet
 # subagent, reviewed by Jordan before merge, live-smoked where `smoke` is
-# set. Supersedes docs/archive/node-cli/workstreams.yaml entirely.
+# set. Supersedes the archived Node-era workstreams entirely (removed; see
+# `git log -- docs/archive/node-cli`).
 #
 # status: proposed | in-progress | done
 # depends: workstream ids that must be merged first
@@ -567,6 +568,83 @@ workstreams:
       - >-
         `kraai-action-smoke` open/sync/close cycle passes against the
         rewritten Action.
+    smoke: true
+
+  - id: release-handover
+    title: Hand the published `kraai` npm name from legacy-node to the Go binary
+    status: proposed
+    depends: [cli-status-and-gc, github-action-go]
+    decisions: [D1]
+    findings:
+      - >-
+        AUDITED 2026-09-14. `legacy-node/` is not dead code — it is the
+        shipping product. npm `kraai@0.5.0` is `latest` on the registry and
+        is published from `legacy-node/` by `.github/workflows/publish.yml`
+        (`npm publish --provenance`, `working-directory: legacy-node`).
+        `release-please-config.json` declares exactly one package,
+        `legacy-node`, mapped to package-name `kraai`, and
+        `.release-please-manifest.json` pins it at 0.5.0. CI runs its test
+        suite and uploads its coverage. The GitHub Action still executes
+        `node .../bin/kraai.mjs` out of `legacy-node/action.yml`.
+      - >-
+        The Go side ships nothing yet: `npm/package.json` is
+        `"private": true` at version `0.0.0`. Both packages are named
+        `kraai`, so the wrapper is waiting to inherit the name, not
+        coexisting with it — which is why this is a handover with an
+        ordering constraint, not a cleanup.
+      - >-
+        `.github/workflows/codeql.yml` scans `javascript-typescript`, so
+        today it analyzes `legacy-node/` and nothing else. The Go code has
+        never been scanned, and every green CodeQL check on a Go PR so far
+        has been vacuous. Deleting `legacy-node/` without flipping the
+        language leaves CodeQL scanning an empty repository, which still
+        reports green.
+    scope:
+      - >-
+        `npm/` takes over the published name: drop `"private": true`, set a
+        version above the legacy line's, and point
+        `release-please-config.json` at `npm/` instead of `legacy-node/`,
+        carrying the `kraai` package-name and the version history with it
+        so the registry sees a continuous line rather than a reset.
+      - >-
+        `publish.yml` publishes the Go wrapper, keeping npm provenance and
+        the existing attestation steps, and gains whatever GoReleaser
+        needs so the binary a freshly-installed wrapper downloads actually
+        exists before the package referencing it is published. Publish
+        order matters: binaries first, package second.
+      - >-
+        Flip `codeql.yml` to `languages: go` in the same change that
+        removes `legacy-node/`, never after. Scanning the wrong tree and
+        scanning no tree are both green; only one of them is noticed.
+      - >-
+        Preserve `internal/naming`'s provenance before deleting its
+        source of truth. `doc.go`, `random.go`, `words.go`,
+        `resource_test.go` and `ephemeral_test.go` all cite
+        `legacy-node/src/names.mjs` and `legacy-node/test/names.test.mjs`
+        as the byte-for-byte golden spec. The golden *values* are already
+        vendored into the Go tests, so nothing breaks at compile time —
+        but the comments become dangling references, and the reason those
+        specific strings are correct is exactly what a future reader will
+        need. Rewrite them to name the git revision they were ported from.
+      - >-
+        Drop legacy-node's CI job and its codecov upload, and remove the
+        legacy release-please component and manifest entry, rather than
+        leaving a pipeline pointed at a directory that no longer exists.
+    acceptance:
+      - >-
+        `npm install -g kraai` and `npx kraai --version` on a clean machine
+        fetch the Go binary and run it, at a version above the last
+        JS release, with npm provenance intact.
+      - >-
+        A CodeQL run analyzes Go source and reports a non-zero number of
+        files scanned — asserted explicitly, because "no findings" and
+        "nothing analyzed" are indistinguishable from the check badge.
+      - >-
+        `kraai-action-smoke` passes with the Action running the Go binary
+        and `legacy-node/` absent from the repository.
+      - >-
+        The repository contains no reference to `legacy-node/` outside git
+        history.
     smoke: true
 
   - id: routes
