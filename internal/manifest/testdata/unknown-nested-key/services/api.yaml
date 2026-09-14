@@ -2,5 +2,5 @@ services:
   api:
     dir: packages/api
     databases:
-      - { binding: DB, engine: sqlite }
-      - { binding: PG, engine: postgres, caching: { disabled: false, maxage: 60 } }
+      - { binding: DB, driver: sqlite }
+      - { binding: PG, driver: postgres, caching: { disabled: false, maxage: 60 } }

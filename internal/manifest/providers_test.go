@@ -11,7 +11,7 @@ import (
 func TestProvidersFor(t *testing.T) {
 	p := Providers{
 		Compute:  &Provider{Vendor: "aws", Settings: map[string]any{"region": "us-east-1"}},
-		Postgres: &Provider{Vendor: "neon"},
+		Database: &Provider{Vendor: "neon"},
 	}
 
 	compute, ok := p.For(CapabilityCompute)
@@ -30,7 +30,7 @@ func TestProvidersFor(t *testing.T) {
 		t.Error("an unknown capability resolved")
 	}
 
-	if got := p.Capabilities(); len(got) != 2 || got[0] != CapabilityCompute || got[1] != CapabilityPostgres {
+	if got := p.Capabilities(); len(got) != 2 || got[0] != CapabilityCompute || got[1] != CapabilityDatabase {
 		t.Fatalf("Capabilities() = %v", got)
 	}
 	if got := (Providers{}).Capabilities(); len(got) != 0 {
@@ -42,17 +42,17 @@ func TestProvidersFor(t *testing.T) {
 // should name the file and key rather than surfacing later as an
 // unresolvable registry lookup with no obvious source.
 func TestValidateRootRequiresAVendor(t *testing.T) {
-	err := validateRoot(&Root{Version: 1, Providers: Providers{Postgres: &Provider{}}})
+	err := validateRoot(&Root{Version: 1, Providers: Providers{Database: &Provider{}}})
 	if err == nil {
 		t.Fatal("a capability with no vendor was accepted")
 	}
-	for _, want := range []string{"providers.postgres", "vendor"} {
+	for _, want := range []string{"providers.database", "vendor"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should mention %q: %v", want, err)
 		}
 	}
 
-	if err := validateRoot(&Root{Version: 1, Providers: Providers{Postgres: &Provider{Vendor: "neon"}}}); err != nil {
+	if err := validateRoot(&Root{Version: 1, Providers: Providers{Database: &Provider{Vendor: "neon"}}}); err != nil {
 		t.Fatalf("a configured vendor was rejected: %v", err)
 	}
 }
@@ -111,5 +111,25 @@ providers:
 	}
 	if !strings.Contains(err.Error(), "regionn") {
 		t.Fatalf("error should name the unknown key: %v", err)
+	}
+}
+
+// TestDatabaseCapabilityIsEngineAgnostic pins why the capability is
+// "database" rather than an engine name. A service's databases: entry already
+// carries an engine; naming one in the capability encoded the same fact twice
+// and left every other engine with no capability at all — Cloudflare D1
+// registered under "database" and was unreachable, because the only database
+// capability the manifest offered was "postgres".
+func TestDatabaseCapabilityIsEngineAgnostic(t *testing.T) {
+	for _, vendor := range []string{"neon", "cloudflare"} {
+		p := Providers{Database: &Provider{Vendor: vendor}}
+		got, ok := p.For(CapabilityDatabase)
+		if !ok || got.Vendor != vendor {
+			t.Fatalf("vendor %q did not resolve through the database capability", vendor)
+		}
+	}
+	// The engine name is not a capability.
+	if _, ok := (Providers{Database: &Provider{Vendor: "neon"}}).For("postgres"); ok {
+		t.Fatal("an engine name resolved as a capability")
 	}
 }

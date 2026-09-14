@@ -35,11 +35,11 @@ func TestLoad_BlueprintExamplesParse(t *testing.T) {
 	if got.Root.Providers.Compute == nil || got.Root.Providers.Compute.Vendor != "cloudflare" {
 		t.Errorf("Root.Providers.Compute = %+v", got.Root.Providers.Compute)
 	}
-	if got.Root.Providers.Postgres == nil || got.Root.Providers.Postgres.Vendor != "neon" {
-		t.Errorf("Root.Providers.Postgres = %+v", got.Root.Providers.Postgres)
+	if got.Root.Providers.Database == nil || got.Root.Providers.Database.Vendor != "neon" {
+		t.Errorf("Root.Providers.Database = %+v", got.Root.Providers.Database)
 	}
 	// A vendor's own settings are carried through uninterpreted.
-	if got := got.Root.Providers.Postgres.Settings["project"]; got != "kraai-control-plane" {
+	if got := got.Root.Providers.Database.Settings["project"]; got != "kraai-control-plane" {
 		t.Errorf("Postgres.Settings[project] = %v", got)
 	}
 	if got.Root.Hooks != "./kraai.hooks.mjs" {
@@ -59,11 +59,11 @@ func TestLoad_BlueprintExamplesParse(t *testing.T) {
 	if len(api.Databases) != 2 {
 		t.Fatalf("api.Databases = %+v", api.Databases)
 	}
-	if api.Databases[0].Binding != "DB" || api.Databases[0].Engine != "sqlite" {
+	if api.Databases[0].Binding != "DB" || api.Databases[0].Driver != "sqlite" {
 		t.Errorf("Databases[0] = %+v", api.Databases[0])
 	}
 	pg := api.Databases[1]
-	if pg.Binding != "PG" || pg.Engine != "postgres" {
+	if pg.Binding != "PG" || pg.Driver != "postgres" {
 		t.Errorf("Databases[1] = %+v", pg)
 	}
 	if pg.Caching == nil || pg.Caching.Disabled != false || pg.Caching.MaxAge != 60 {

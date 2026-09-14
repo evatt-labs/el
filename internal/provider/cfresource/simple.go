@@ -43,6 +43,32 @@ type simple struct {
 	// id — true for R2, whose name is its identifier and which therefore has
 	// no lookup step at all.
 	deleteByName bool
+	// driver is the wire protocol this type speaks, for database types only.
+	// See checkDriver.
+	driver string
+}
+
+// checkDriver rejects a binding asking to connect over a protocol this type
+// does not speak. Only the database types declare a driver; everything else
+// leaves it empty and skips the check entirely.
+//
+// The capability says "database" and the vendor says who provides it, so the
+// driver is the only thing left saying what the application will actually
+// connect with. A binding declaring postgres under a vendor that speaks
+// SQLite would otherwise get SQLite without a word, and the failure would
+// surface as a connection error from library code far from the manifest that
+// caused it.
+func (s *simple) checkDriver(config map[string]any) error {
+	if s.driver == "" {
+		return nil
+	}
+	declared, _ := config["driver"].(string)
+	if declared == "" || declared == s.driver {
+		return nil
+	}
+	return kerrors.Validation(
+		"this database binding declares driver %q, but %s/%s speaks %s — change the driver "+
+			"or the vendor", declared, s.provider, s.typ, s.driver)
 }
 
 // Get reports the resource's current state, or (nil, nil) when it is absent.
@@ -63,6 +89,9 @@ func (s *simple) Create(ctx context.Context, spec resource.Spec) (*resource.Stat
 	if spec.Name == "" {
 		return nil, kerrors.Validation(
 			"cannot create %s/%s for binding %q without a derived name", s.provider, s.typ, spec.Binding)
+	}
+	if err := s.checkDriver(spec.Config); err != nil {
+		return nil, err
 	}
 	id, err := s.create(ctx, spec.Name)
 	if err != nil {

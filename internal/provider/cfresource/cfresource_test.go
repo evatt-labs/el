@@ -396,3 +396,60 @@ func TestQueueGetAndDeleteResolveTheID(t *testing.T) {
 		t.Fatalf("deleted %q, want the looked-up id", deletedPath)
 	}
 }
+
+// TestD1RejectsAMismatchedDriver: the database capability is engine-agnostic,
+// so the vendor chooses the implementation and the engine says what the
+// service asked for. A binding declaring postgres under a vendor that
+// provisions SQLite must be told, not quietly handed SQLite.
+func TestD1RejectsAMismatchedDriver(t *testing.T) {
+	var posts atomic.Int32
+	client, _ := newClient(t, func(c call) (int, string) {
+		if c.method == "POST" {
+			posts.Add(1)
+		}
+		return ok(`{"uuid":"db-1"}`)
+	})
+	reg := registryFor(t, client)
+	entry, _ := reg.Lookup("cloudflare/d1_database")
+
+	_, err := entry.Resource.Create(t.Context(), resource.Spec{
+		Binding: "DB", Name: "env-a-api-db",
+		Config: map[string]any{"driver": "postgres"},
+	})
+	if err == nil {
+		t.Fatal("a postgres binding was silently provisioned as SQLite")
+	}
+	if !strings.Contains(err.Error(), "postgres") || !strings.Contains(err.Error(), DriverD1) {
+		t.Fatalf("error should name both drivers: %v", err)
+	}
+	if posts.Load() != 0 {
+		t.Fatal("the API was called despite the mismatch")
+	}
+
+	// The matching driver, and an unstated one, both proceed.
+	for _, driver := range []string{DriverD1, ""} {
+		if _, err := entry.Resource.Create(t.Context(), resource.Spec{
+			Binding: "DB", Name: "env-a-api-db",
+			Config: map[string]any{"driver": driver},
+		}); err != nil {
+			t.Errorf("driver %q was rejected: %v", driver, err)
+		}
+	}
+}
+
+// Only the database types carry an engine; the rest must not gain a check
+// they have no content for.
+func TestNonDatabaseTypesIgnoreDriver(t *testing.T) {
+	client, _ := newClient(t, func(call) (int, string) { return ok(`{"id":"x","name":"x"}`) })
+	reg := registryFor(t, client)
+
+	for _, key := range []string{"cloudflare/kv_namespace", "cloudflare/r2_bucket", "cloudflare/queue"} {
+		entry, _ := reg.Lookup(key)
+		if _, err := entry.Resource.Create(t.Context(), resource.Spec{
+			Binding: "B", Name: "env-a-api-b",
+			Config: map[string]any{"driver": "postgres"},
+		}); err != nil {
+			t.Errorf("%s rejected an irrelevant driver value: %v", key, err)
+		}
+	}
+}

@@ -32,7 +32,7 @@ type Root struct {
 // capabilities the resource registry has implementations for.
 type Providers struct {
 	Compute  *Provider `yaml:"compute,omitempty"`
-	Postgres *Provider `yaml:"postgres,omitempty"`
+	Database *Provider `yaml:"database,omitempty"`
 	KeyValue *Provider `yaml:"keyvalue,omitempty"`
 	Objects  *Provider `yaml:"objects,omitempty"`
 	Queues   *Provider `yaml:"queues,omitempty"`
@@ -43,8 +43,14 @@ type Providers struct {
 // provider uses the same strings the registry does, rather than a second copy
 // that can drift.
 const (
-	CapabilityCompute  = "compute"
-	CapabilityPostgres = "postgres"
+	CapabilityCompute = "compute"
+	// CapabilityDatabase covers every database engine, not one of them. A
+	// service's `databases:` entry already carries an `engine`, so the
+	// capability naming a specific engine would encode the same fact twice
+	// and, worse, leave engines with no capability at all: Cloudflare D1
+	// registered under "database" and was unreachable, because the only
+	// database capability the manifest offered was "postgres".
+	CapabilityDatabase = "database"
 	CapabilityKeyValue = "keyvalue"
 	CapabilityObjects  = "objects"
 	CapabilityQueues   = "queues"
@@ -79,8 +85,8 @@ func (p Providers) For(capability string) (*Provider, bool) {
 	switch capability {
 	case CapabilityCompute:
 		configured = p.Compute
-	case CapabilityPostgres:
-		configured = p.Postgres
+	case CapabilityDatabase:
+		configured = p.Database
 	case CapabilityKeyValue:
 		configured = p.KeyValue
 	case CapabilityObjects:
@@ -101,7 +107,7 @@ func (p Providers) For(capability string) (*Provider, bool) {
 func (p Providers) Capabilities() []string {
 	var out []string
 	for _, capability := range []string{
-		CapabilityCompute, CapabilityPostgres,
+		CapabilityCompute, CapabilityDatabase,
 		CapabilityKeyValue, CapabilityObjects, CapabilityQueues,
 	} {
 		if _, ok := p.For(capability); ok {
@@ -128,14 +134,21 @@ type Service struct {
 	Queues    []Queue       `yaml:"queues,omitempty"`
 }
 
-// Database is one entry of a service's `databases:` list. Engine is a
-// free-form string, not an enum: BLUEPRINT.md's "Manifest schema" section
-// notes per-resource schemas are generated from each provider's own
-// machine-readable source in a later workstream, never hand-transcribed —
-// this workstream doesn't own that closed vocabulary.
+// Database is one entry of a service's `databases:` list.
+//
+// Driver is what the application connects with — the wire protocol and
+// client library — not which product implements it. That is the distinction
+// the field exists to carry: Neon is Postgres-wire and Cloudflare D1 is
+// SQLite-wire, and an application cares which of those it is speaking, not
+// whose storage is underneath. `driver: postgres` is therefore a claim about
+// the connection the service expects, which a provider can honour or refuse.
+//
+// Free-form rather than an enum: per-resource schemas are generated from each
+// provider's own machine-readable source in a later workstream, never
+// hand-transcribed, so this package does not own that vocabulary.
 type Database struct {
 	Binding string   `yaml:"binding"`
-	Engine  string   `yaml:"engine"`
+	Driver  string   `yaml:"driver"`
 	Caching *Caching `yaml:"caching,omitempty"`
 }
 

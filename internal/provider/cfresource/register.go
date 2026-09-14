@@ -3,12 +3,18 @@ package cfresource
 import (
 	"context"
 
+	"github.com/evatt-labs/kraai/internal/manifest"
 	"github.com/evatt-labs/kraai/internal/provider/cloudflare"
 	"github.com/evatt-labs/kraai/internal/resource"
 )
 
 // Provider is the vendor name these types register under.
 const Provider = "cloudflare"
+
+// DriverD1 is the wire protocol a service reaches D1 through. D1 speaks
+// SQLite, which is what an application connects with regardless of what
+// Cloudflare runs underneath.
+const DriverD1 = "sqlite"
 
 // Resource type names, which are Cloudflare's own vocabulary rather than
 // kraai's — the manifest never names these, the registry maps to them.
@@ -39,12 +45,15 @@ func Registrations(client *cloudflare.Client) []resource.Registration {
 	return []resource.Registration{
 		{
 			Provider: Provider, Type: TypeD1Database,
-			Capability: "database", Phase: resource.PhaseStorage,
+			Capability: manifest.CapabilityDatabase, Phase: resource.PhaseStorage,
 			// The list endpoint takes a name filter, so the lookup is
 			// server-side rather than a paged scan.
 			Lookup: resource.LookupByAPI,
 			Resource: &simple{
 				provider: Provider, typ: TypeD1Database,
+				// D1 speaks SQLite. A binding asking to connect over
+				// Postgres must not silently receive it.
+				driver: DriverD1,
 				create: client.D1.Create,
 				find: func(ctx context.Context, name string) (string, bool, error) {
 					db, err := client.D1.FindByName(ctx, name)
@@ -58,7 +67,7 @@ func Registrations(client *cloudflare.Client) []resource.Registration {
 		},
 		{
 			Provider: Provider, Type: TypeKVNamespace,
-			Capability: "keyvalue", Phase: resource.PhaseStorage,
+			Capability: manifest.CapabilityKeyValue, Phase: resource.PhaseStorage,
 			// Listed and filtered on title, which the endpoint guarantees
 			// unique. Paged: its default is twenty per page.
 			Lookup: resource.LookupByAttr,
@@ -77,7 +86,7 @@ func Registrations(client *cloudflare.Client) []resource.Registration {
 		},
 		{
 			Provider: Provider, Type: TypeR2Bucket,
-			Capability: "objects", Phase: resource.PhaseStorage,
+			Capability: manifest.CapabilityObjects, Phase: resource.PhaseStorage,
 			// The name is the identifier: no separate id, so no lookup step
 			// before a delete.
 			Lookup: resource.LookupByName,
@@ -101,7 +110,7 @@ func Registrations(client *cloudflare.Client) []resource.Registration {
 		},
 		{
 			Provider: Provider, Type: TypeQueue,
-			Capability: "queues", Phase: resource.PhaseStorage,
+			Capability: manifest.CapabilityQueues, Phase: resource.PhaseStorage,
 			Lookup: resource.LookupByAttr,
 			Resource: &simple{
 				provider: Provider, typ: TypeQueue,
