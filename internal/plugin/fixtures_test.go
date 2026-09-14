@@ -248,3 +248,83 @@ func buildSpinningPlugin() []byte {
 	m.addExportMemory(exportMemory, 0)
 	return m.bytes()
 }
+
+// fixtureDepthCounter is the guest memory address buildReentrantAllocPlugin
+// keeps its self-imposed recursion counter at.
+const fixtureDepthCounter = 16
+
+// buildReentrantAllocPlugin returns a module whose kraai_alloc calls back
+// into an imported host capability before returning — the shape that
+// matters because the host calls kraai_alloc from *inside*
+// hostCapabilityFunc (to place the capability's own response), so the
+// guest gets to re-enter the host from within a host call.
+//
+// The fixture stops itself after maxDepth re-entries using a counter in
+// its own linear memory, purely so this package's tests stay bounded. A
+// hostile plugin simply omits the counter; nothing on the host side is
+// stopping it, which is the whole point of the probe.
+func buildReentrantAllocPlugin(capName string, maxDepth int32) []byte {
+	m := &wasmModule{}
+	tI32I32ToI64 := m.addType([]byte{valI32, valI32}, []byte{valI64})
+	imported := m.addImportFunc(HostNamespace, capName, tI32I32ToI64)
+
+	tNoneI32 := m.addType(nil, []byte{valI32})
+	tI32ToI32 := m.addType([]byte{valI32}, []byte{valI32})
+	tI32I32ToNone := m.addType([]byte{valI32, valI32}, nil)
+
+	version := m.addFunc(tNoneI32, funcBody(goodVersionBody()))
+	alloc := m.addFunc(tI32ToI32, funcBody(concatBytes(
+		// counter++
+		iI32Const(fixtureDepthCounter),
+		iI32Const(fixtureDepthCounter), iI32Load8U(), iI32Const(1), iI32Add(),
+		iI32Store8(),
+		// if counter < maxDepth: call the host capability again, discarding
+		// whatever it packs back.
+		iI32Const(fixtureDepthCounter), iI32Load8U(), iI32Const(maxDepth), iI32LtU(),
+		iIf(concatBytes(iI32Const(0), iI32Const(0), iCall(imported), iDrop())),
+		// ...then behave like any other allocator.
+		iI32Const(fixtureAllocBase),
+	)))
+	dealloc := m.addFunc(tI32I32ToNone, funcBody(nil))
+	m.addExportFunc(funcABIVersion, version)
+	m.addExportFunc(funcAlloc, alloc)
+	m.addExportFunc(funcDealloc, dealloc)
+
+	call := m.addFunc(tI32I32ToI64, funcBody(concatBytes(iLocalGet(0), iLocalGet(1), iCall(imported))))
+	m.addExportFunc(fixtureHostCallExport, call)
+
+	m.setMemoryPages(fixtureMemPages)
+	m.addExportMemory(exportMemory, 0)
+	return m.bytes()
+}
+
+// buildUnboundedReentrantAllocPlugin is buildReentrantAllocPlugin with
+// the self-imposed counter removed: kraai_alloc calls the host capability
+// every single time. This is what a hostile plugin actually looks like —
+// the counter in the bounded fixture is a courtesy no attacker extends.
+func buildUnboundedReentrantAllocPlugin(capName string) []byte {
+	m := &wasmModule{}
+	tI32I32ToI64 := m.addType([]byte{valI32, valI32}, []byte{valI64})
+	imported := m.addImportFunc(HostNamespace, capName, tI32I32ToI64)
+
+	tNoneI32 := m.addType(nil, []byte{valI32})
+	tI32ToI32 := m.addType([]byte{valI32}, []byte{valI32})
+	tI32I32ToNone := m.addType([]byte{valI32, valI32}, nil)
+
+	version := m.addFunc(tNoneI32, funcBody(goodVersionBody()))
+	alloc := m.addFunc(tI32ToI32, funcBody(concatBytes(
+		iI32Const(0), iI32Const(0), iCall(imported), iDrop(),
+		iI32Const(fixtureAllocBase),
+	)))
+	dealloc := m.addFunc(tI32I32ToNone, funcBody(nil))
+	m.addExportFunc(funcABIVersion, version)
+	m.addExportFunc(funcAlloc, alloc)
+	m.addExportFunc(funcDealloc, dealloc)
+
+	call := m.addFunc(tI32I32ToI64, funcBody(concatBytes(iLocalGet(0), iLocalGet(1), iCall(imported))))
+	m.addExportFunc(fixtureHostCallExport, call)
+
+	m.setMemoryPages(fixtureMemPages)
+	m.addExportMemory(exportMemory, 0)
+	return m.bytes()
+}

@@ -26,10 +26,13 @@ type Capability interface {
 	// Invoke handles one call's raw input bytes (already read out of the
 	// calling plugin's memory) and returns the raw output payload. An
 	// error becomes StatusError plus the error's message in the envelope
-	// the plugin sees; Invoke should never panic for an ordinary failure
-	// (a bad request, a failed network call) — only Host's own plumbing
-	// panics, and only for a plugin-side ABI violation it cannot recover
-	// from safely.
+	// the plugin sees — so an implementation must treat its error strings
+	// as output to untrusted code, and keep credentials, internal
+	// hostnames, and wrapped transport detail out of them.
+	//
+	// Invoke should never panic for an ordinary failure (a bad request, a
+	// failed network call) — only Host's own plumbing panics, and only for
+	// a plugin-side ABI violation it cannot recover from safely.
 	Invoke(ctx context.Context, input []byte) ([]byte, error)
 }
 

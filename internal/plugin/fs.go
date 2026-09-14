@@ -21,8 +21,22 @@ import (
 // caller wires the two together.
 type FS interface {
 	// ReadFile reads the file at name and returns its contents.
+	//
+	// An implementation should bound what it will read into memory;
+	// NewOSFS's does, at MaxPluginBytes. Host.Load re-checks the length it
+	// gets back regardless, since FS is an extension point (D20) and a
+	// caller's own implementation is not this package's to trust.
 	ReadFile(name string) ([]byte, error)
 }
+
+// MaxPluginBytes bounds a single plugin's compiled WASM binary. A
+// .wasm file is read wholly into memory and then compiled, and wazero's
+// compile cost is linear in module size (~440ns/byte, docs/BLUEPRINT.md),
+// so an oversized file costs host memory and CPU before a single guest
+// instruction runs — the one part of loading a plugin that happens
+// entirely outside any sandbox. 64MiB is ~34x the largest real module
+// measured (1.86MB for a Go wasip1 reactor).
+const MaxPluginBytes = 64 << 20
 
 // osFS is FS's standalone implementation, rooted at a directory on disk
 // via os.Root for the same symlink-containment reason
@@ -51,5 +65,16 @@ func (f osFS) ReadFile(name string) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = file.Close() }()
-	return io.ReadAll(file)
+	// LimitReader one byte past the maximum: reading exactly that many
+	// back means the file is larger than the limit, which a plain
+	// io.ReadAll would instead have happily pulled into memory in full
+	// before anyone could object.
+	b, err := io.ReadAll(io.LimitReader(file, MaxPluginBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxPluginBytes {
+		return nil, kerrors.Validation("plugin file %s exceeds the %d-byte maximum", name, MaxPluginBytes)
+	}
+	return b, nil
 }

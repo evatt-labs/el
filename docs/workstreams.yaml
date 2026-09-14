@@ -226,6 +226,21 @@ workstreams:
         that termination closed. Every one of these probes is bounded by
         construction — a two-page limit and a 150ms deadline, never
         "allocate or spin until the machine stops it."
+      - >-
+        A plugin cannot abort the host process by re-entering it: a guest
+        whose `kraai_alloc` calls a host capability closes a
+        hostCapabilityFunc -> placeEnvelope -> placeInGuestMemory ->
+        kraai_alloc cycle on the caller's goroutine. Measured against a
+        deliberately-lowered 8MiB stack this produced `fatal error: stack
+        overflow` (exit 2) — fatal, so unrecoverable by `recover()`, and
+        growing host stack no WASM memory limit governs. Bounded by
+        MaxHostCallDepth, with a control test proving shallow re-entry
+        still works.
+      - >-
+        A plugin binary larger than MaxPluginBytes is refused before it
+        reaches the compiler: reading and compiling the .wasm is the one
+        part of loading that happens entirely outside the sandbox, at a
+        cost linear in file size.
     smoke: false
 
   - id: resource-contract-and-telemetry

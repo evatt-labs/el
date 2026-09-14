@@ -121,9 +121,35 @@
 // closed, so a cancelled Invoke costs one re-instantiation rather than
 // permanently poisoning a pool slot. See pool.get.
 //
-// Neither ceiling is configurable per plugin. Both are the host's trust
-// boundary against code it did not write, and a boundary a plugin author
-// can widen from their own manifest entry is not one.
+// A third ceiling, MaxHostCallDepth, bounds guest re-entry. Delivering a
+// host capability's response means calling the guest's own kraai_alloc
+// (the host never writes into memory it did not ask the guest to
+// allocate), so a guest whose allocator calls a host capability closes a
+// cycle that grows the *Go* stack — host memory no WASM limit governs,
+// and whose exhaustion is a fatal error rather than a recoverable panic.
+//
+// MaxPluginBytes bounds the one part of loading that happens entirely
+// outside the sandbox: the .wasm file is read whole into host memory and
+// compiled at a cost linear in its size, both before a single guest
+// instruction runs.
+//
+// None of these ceilings is configurable per plugin. All are the host's
+// trust boundary against code it did not write, and a boundary a plugin
+// author can widen from their own manifest entry is not one.
+//
+// Two things these ceilings deliberately do not cover, because they are
+// properties of the caller rather than of this package:
+//
+//   - Host.Load runs guest code (module instantiation, _initialize, ABI
+//     validation) under the ctx it is given, so the same deadline
+//     discipline Invoke documents applies to Load.
+//
+//   - A Capability's error message is written verbatim into the calling
+//     plugin's memory as the StatusError payload. The ABI needs an error
+//     channel and this is it, but it means a capability implementation
+//     must treat its own error strings as output to untrusted code: no
+//     credentials, no internal hostnames, no wrapped transport detail
+//     that would not be safe to hand the plugin author directly.
 //
 // # Middleware (blueprint open question 3)
 //

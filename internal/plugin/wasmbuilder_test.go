@@ -41,6 +41,10 @@ const (
 	opLoop          = 0x03
 	opBr            = 0x0C
 	opMemoryGrow    = 0x40
+	opI32Load8U     = 0x2D
+	opI32LtU        = 0x49
+	opIf            = 0x04
+	opDrop          = 0x1A
 
 	// blockTypeEmpty is the "no result" block type immediate. It shares
 	// its encoding with valI64 (0x40 vs 0x7E are distinct, but the empty
@@ -135,6 +139,16 @@ func iI32Add() []byte             { return []byte{opI32Add} }
 // what a runtime memory limit produces — the WASM spec makes a failed
 // grow a return value, not a trap).
 func iMemoryGrow() []byte { return []byte{opMemoryGrow, 0x00} }
+
+func iI32Load8U() []byte { return []byte{opI32Load8U, 0x00, 0x00} } // align=1 byte, offset=0
+func iI32LtU() []byte    { return []byte{opI32LtU} }
+func iDrop() []byte      { return []byte{opDrop} }
+
+// iIf emits `if <empty blocktype> body end` — a body executed only when
+// the i32 already on the stack is non-zero.
+func iIf(body []byte) []byte {
+	return concatBytes([]byte{opIf, blockTypeEmpty}, body, []byte{opEnd})
+}
 
 // iSpinForever emits `loop; br 0; end` — a block that branches back to
 // its own start unconditionally and therefore never falls through. This

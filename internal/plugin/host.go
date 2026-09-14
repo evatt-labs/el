@@ -31,6 +31,44 @@ const DefaultPoolSize = 4
 // grow.
 const DefaultMemoryLimitPages = 1024
 
+// MaxHostCallDepth bounds how deeply a guest may re-enter the host's
+// capability functions within a single Invoke.
+//
+// The re-entry exists because the host cannot write into guest memory it
+// did not ask the guest to allocate: delivering a capability's response
+// means calling the guest's own kraai_alloc from inside
+// hostCapabilityFunc. A guest whose kraai_alloc calls a host capability
+// therefore closes a cycle — hostCapabilityFunc -> placeEnvelope ->
+// placeInGuestMemory -> guest kraai_alloc -> hostCapabilityFunc — that
+// runs on the caller's goroutine and adds Go stack frames every lap.
+//
+// Left unbounded that is not a leak but an abort: Go's goroutine stack
+// limit (1GB by default) is a *fatal* error, not a panic, so recover()
+// cannot catch it and the entire kraai process dies. A plugin needs no
+// memory, no syscall, and no exploit to trigger it — only an allocator
+// that calls back. The stack is also host memory that no WASM memory
+// limit governs, which is why DefaultMemoryLimitPages does not cover
+// this.
+//
+// 8 is far above anything a well-formed plugin reaches: a normal
+// allocator calls nothing, and even a capability handler that legitimately
+// invokes another capability nests one level per call.
+const MaxHostCallDepth = 8
+
+// hostCallDepthKey types the context value carrying the current re-entry
+// depth. The context wazero hands a host function is the one its caller
+// passed to Call, and placeInGuestMemory passes that same context back
+// into the guest, so incrementing it across the boundary is enough to
+// make the depth follow the cycle without any per-module bookkeeping (and
+// without a shared counter that concurrent Invokes on separate pool
+// instances would contend over or, worse, share).
+type hostCallDepthKey struct{}
+
+func hostCallDepth(ctx context.Context) int {
+	d, _ := ctx.Value(hostCallDepthKey{}).(int)
+	return d
+}
+
 // Provision names one capability a plugin implements: Key is whatever a
 // caller registers it under in a Registry (this package places no
 // constraint on its shape — see Registry), and Export is the plugin's own
@@ -146,6 +184,17 @@ func (h *Host) Load(ctx context.Context, fsys FS, spec Spec) (*Plugin, error) {
 	if err != nil {
 		return nil, kerrors.Wrap(err, kerrors.CodeValidation, "reading plugin %q at %s", spec.Name, spec.Path)
 	}
+	// Re-checked rather than delegated: FS is an extension point (D20) and
+	// a caller's implementation may not bound itself. This cannot undo an
+	// allocation such an implementation already made, but it does stop an
+	// oversized module reaching the compiler, which is where the cost
+	// actually scales.
+	if len(wasmBytes) > MaxPluginBytes {
+		return nil, kerrors.Validation(
+			"plugin %q at %s is %d bytes, exceeding the %d-byte maximum",
+			spec.Name, spec.Path, len(wasmBytes), MaxPluginBytes,
+		)
+	}
 
 	granted, err := h.grantedCapabilities(spec)
 	if err != nil {
@@ -250,6 +299,20 @@ func hostCapabilityFunc(capa Capability) api.GoModuleFunction {
 		// into uint64 slots (wazero's calling convention for every value
 		// type); truncating back to uint32 recovers the exact i32 value,
 		// it never discards real bits.
+		depth := hostCallDepth(ctx) + 1
+		if depth > MaxHostCallDepth {
+			// Panic rather than return a StatusError envelope: building
+			// that envelope means calling the guest's kraai_alloc, which
+			// is the very cycle being cut. Panicking is wazero's
+			// documented way for a host function to abort a call, and it
+			// unwinds the whole nest at once.
+			panic(kerrors.Validation(
+				"plugin %q exceeded the maximum host-call re-entry depth of %d calling %s — its kraai_alloc is calling back into the host",
+				mod.Name(), MaxHostCallDepth, capa.Name(),
+			))
+		}
+		ctx = context.WithValue(ctx, hostCallDepthKey{}, depth)
+
 		ptr, length := uint32(stack[0]), uint32(stack[1]) //nolint:gosec // see comment above
 		input, err := readRegion(mod.Memory(), ptr, length)
 		if err != nil {
