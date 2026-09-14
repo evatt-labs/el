@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evatt-labs/kraai/internal/env"
 	"github.com/evatt-labs/kraai/internal/kerrors"
 	"github.com/evatt-labs/kraai/internal/manifest"
 	"github.com/evatt-labs/kraai/internal/naming"
@@ -104,6 +105,27 @@ func runPlan(cmd *cobra.Command, envName, dir string, setArgs []string, jsonOut 
 
 	fsys, err := manifest.NewFS(dir)
 	if err != nil {
+		return err
+	}
+
+	// Load dir/.env, after NewFS has established dir is a readable directory
+	// and before anything asks for a credential.
+	//
+	// env.Require's own failure message tells the user to "set them in .env
+	// or export them", and until this call existed a .env file was silently
+	// ignored — the tool promising a mechanism it did not have, at exactly
+	// the moment someone is stuck trying to authenticate. Already-exported
+	// variables still win, so this adds a convenience and overrides nothing.
+	//
+	// Ordered after NewFS deliberately: reading .env first meant a --dir that
+	// was not a directory failed here, as an unexpected error about a file
+	// nobody mentioned, instead of as the validation error NewFS gives about
+	// the directory the user actually passed.
+	//
+	// Read from the manifest directory rather than the working directory: a
+	// .env belongs beside the manifest whose providers it authenticates, and
+	// --dir is what says where that is.
+	if err := env.LoadDotEnv(dir); err != nil {
 		return err
 	}
 
