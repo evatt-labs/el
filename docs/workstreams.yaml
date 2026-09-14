@@ -422,6 +422,51 @@ workstreams:
       — production-intended infrastructure, not a disposable fixture, so
       `protected: true` from day one.
 
+  - id: per-service-compute
+    title: Per-service compute configuration and trigger shape
+    status: proposed
+    depends: [plan-apply-destroy]
+    decisions: [D34, D36]
+    findings:
+      - >-
+        FOUND 2026-09-14 by running `kraai plan` against the real kraai-api
+        manifest, not by review. Every service plans BOTH a Lambda and an
+        API Gateway, because the AWS provider registers two types under the
+        `compute` capability and D36 synthesises one compute resource per
+        service for every registered type. `tick` is a scheduled worker
+        with no HTTP surface at all, so its API Gateway is wrong output,
+        not merely redundant.
+      - >-
+        The underlying gap is that `providers.compute.settings` is one blob
+        shared by every service using the capability, while the two
+        services genuinely differ: `api` needs a Web Adapter layer and HTTP
+        triggering, `tick` needs neither and has its own handler path.
+        First reported when the manifests were written, confirmed by the
+        plan output.
+      - >-
+        Also observed in the same run: the AWS client takes its region from
+        AWS_REGION rather than from `providers.compute.settings.region`,
+        which the manifest already carries.
+    scope:
+      - >-
+        A way for a service to say what shape it is - HTTP-facing versus
+        invoked - so a compute vendor registers only the types that shape
+        implies. Whether that is a field on Service, a second capability,
+        or a condition like D36's is the design question.
+      - >-
+        Per-service compute settings, layered over the provider-level
+        block rather than replacing it, so the common case stays one
+        declaration.
+      - >-
+        Provider settings reaching the client: region from the manifest,
+        not only the environment.
+    acceptance:
+      - >-
+        `kraai plan` against kraai-api plans one Lambda for `tick` and no
+        API Gateway, and both for `api`, driven by the manifest rather than
+        by which types happen to be registered.
+    smoke: false
+
   - id: aws-provider-compute
     title: AWS provider Tier 2 — Lambda/API resources (only if kraai-api exists)
     status: proposed
