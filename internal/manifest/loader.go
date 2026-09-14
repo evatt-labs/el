@@ -104,6 +104,17 @@ func validateRoot(root *Root) error {
 	if root.Version != 1 {
 		return kerrors.Validation("%s: version: must be 1, got %d", rootFile, root.Version)
 	}
+	// A configured capability naming no vendor cannot resolve to anything.
+	// Caught here rather than when the registry is consulted, so the error
+	// names the file and the key instead of surfacing later as an unresolvable
+	// lookup with no obvious source.
+	for _, capability := range root.Providers.Capabilities() {
+		provider, _ := root.Providers.For(capability)
+		if provider.Vendor == "" {
+			return kerrors.Validation(
+				"%s: providers.%s: vendor is required", rootFile, capability)
+		}
+	}
 	return nil
 }
 

@@ -1,4 +1,5 @@
 version: 1
 
 providers:
-  compute: "{{ compute|default:'default-compute' }}"
+  compute:
+    vendor: "{{ compute|default:'default-compute' }}"

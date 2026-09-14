@@ -71,6 +71,7 @@ itself ships, and structurally faster:
 | D31 | **Ordering is declared phases (`database` → `storage` → `compute`), not a dependency graph.** Each registration names its phase; the applier runs phases in sequence and everything within a phase in parallel under D13's limit. Teardown runs them in reverse. | Resources genuinely depend on each other — Hyperdrive needs its branch's connection details — and the JavaScript encoded that by hardcoding provider-first. A general DAG expresses the same thing and buys flexibility nothing currently needs, at the cost of cycle detection, partial-failure semantics across an arbitrary topology, and a much harder model for anyone adding a type. Reverse-phase teardown is already what `down.mjs` did: workers, then per-service resources, then the provider last. |
 | D32 | **Values cross phases through a per-run `Outputs`; credentials cross as a producer function, never a stored value.** Identifiers, names and hosts are recorded as attributes; a credential is registered as a `Secret` the consumer calls at the moment of use, and is never cached. | Something has to carry a branch's connection details to the Hyperdrive configuration and every resource id to the Worker deploy, and one of those values is live. Keeping credentials out of the struct means nothing that is logged, serialised, written to the lockfile, or rendered into an error has ever held one — a property that holds by construction rather than by every future caller remembering. Caching a resolved secret would put it back in the struct the design exists to keep it out of. |
 | D33 | **`kraai.config.mjs`'s `configure()`/`seed()`/`open()` hooks become plugin capability keys, not a ported mechanism.** `Root.Hooks` and `Root.Plugins` resolve against the WASM plugin runtime; a `seed` hook is a plugin granted the Postgres capability. | A Go binary cannot execute a JavaScript module, so the hook mechanism cannot be ported at all — this is a breaking change for existing configs regardless, and the only question was what replaces it. The plugin runtime already carries opaque bytes both ways and already grants capabilities explicitly, which is a far better boundary than arbitrary Node running with the full credentials of the process. Requires a major version and a migration guide. |
+| D34 | **A capability's provider carries its own free-form `settings`, validated by the provider rather than by the manifest schema.** `providers.<capability>` becomes `{vendor, settings}`; `Providers` stays a fixed struct so an unknown capability is still rejected at load. | Which Neon project to branch from, which AWS region to deploy into, which Lambda runtime — none of it belongs in the manifest package's vocabulary, and encoding it there would put every vendor's fields in the one type whose purpose is not having them. Found by building the Neon adapter, which had nowhere to read its project and role from and had to carry them through `Spec.Config` instead. Carries the same exemption `Values` does (D5), and the same cost: `settings` is the one part of a manifest not schema-checked at load. The capability vocabulary is no longer a guess — it is exactly the set the resource registry has implementations for. |
 
 ## Manifest schema
 
@@ -79,10 +80,15 @@ itself ships, and structurally faster:
 ```yaml
 version: 1
 
-providers:                      # who fulfils what capability; vendor names
-  compute: cloudflare            # appear nowhere else in the manifest (D9-adjacent
-  postgres: neon                 # vocabulary carried forward from prior design work;
-                                  # confirm before this ships — see Open questions)
+providers:                      # who fulfils what capability, and that vendor's
+  compute:                        # own configuration. Vendor names appear nowhere
+    vendor: cloudflare            # else in the manifest.
+  postgres:
+    vendor: neon
+    settings:                     # free-form, passed to the provider uninterpreted
+      project: my-project         # and validated by it (D34)
+      database: appdb
+      role: app
 
 hooks: ./kraai.hooks.mjs          # placeholder path form; hook language/runtime for
                                   # the Go rewrite is itself an open question, see below

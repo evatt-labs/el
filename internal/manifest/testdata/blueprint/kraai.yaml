@@ -1,8 +1,14 @@
 version: 1
 
 providers:
-  compute: cloudflare
-  postgres: neon
+  compute:
+    vendor: cloudflare
+  postgres:
+    vendor: neon
+    settings:
+      project: kraai-control-plane
+      database: appdb
+      role: app
 
 hooks: ./kraai.hooks.mjs
 

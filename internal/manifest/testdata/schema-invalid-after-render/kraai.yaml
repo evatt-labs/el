@@ -1,3 +1,4 @@
 version: 1
 providers:
-  compute: cloudflare
+  compute:
+    vendor: cloudflare

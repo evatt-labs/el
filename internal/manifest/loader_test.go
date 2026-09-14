@@ -32,8 +32,15 @@ func TestLoad_BlueprintExamplesParse(t *testing.T) {
 	if got.Root.Version != 1 {
 		t.Errorf("Root.Version = %d, want 1", got.Root.Version)
 	}
-	if got.Root.Providers.Compute != "cloudflare" || got.Root.Providers.Postgres != "neon" {
-		t.Errorf("Root.Providers = %+v", got.Root.Providers)
+	if got.Root.Providers.Compute == nil || got.Root.Providers.Compute.Vendor != "cloudflare" {
+		t.Errorf("Root.Providers.Compute = %+v", got.Root.Providers.Compute)
+	}
+	if got.Root.Providers.Postgres == nil || got.Root.Providers.Postgres.Vendor != "neon" {
+		t.Errorf("Root.Providers.Postgres = %+v", got.Root.Providers.Postgres)
+	}
+	// A vendor's own settings are carried through uninterpreted.
+	if got := got.Root.Providers.Postgres.Settings["project"]; got != "kraai-control-plane" {
+		t.Errorf("Postgres.Settings[project] = %v", got)
 	}
 	if got.Root.Hooks != "./kraai.hooks.mjs" {
 		t.Errorf("Root.Hooks = %q", got.Root.Hooks)
@@ -153,8 +160,8 @@ func TestLoad_SetOverridesValuesOverridesTemplateDefault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.Root.Providers.Compute != "default-compute" {
-			t.Errorf("Providers.Compute = %q, want the template default", got.Root.Providers.Compute)
+		if got.Root.Providers.Compute == nil || got.Root.Providers.Compute.Vendor != "default-compute" {
+			t.Errorf("Providers.Compute = %+v, want the template default", got.Root.Providers.Compute)
 		}
 	})
 
@@ -163,8 +170,8 @@ func TestLoad_SetOverridesValuesOverridesTemplateDefault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.Root.Providers.Compute != "from-values" {
-			t.Errorf("Providers.Compute = %q, want the values-file value", got.Root.Providers.Compute)
+		if got.Root.Providers.Compute == nil || got.Root.Providers.Compute.Vendor != "from-values" {
+			t.Errorf("Providers.Compute = %+v, want the values-file value", got.Root.Providers.Compute)
 		}
 	})
 
@@ -173,8 +180,8 @@ func TestLoad_SetOverridesValuesOverridesTemplateDefault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.Root.Providers.Compute != "from-cli" {
-			t.Errorf("Providers.Compute = %q, want the --set value", got.Root.Providers.Compute)
+		if got.Root.Providers.Compute == nil || got.Root.Providers.Compute.Vendor != "from-cli" {
+			t.Errorf("Providers.Compute = %+v, want the --set value", got.Root.Providers.Compute)
 		}
 	})
 }
