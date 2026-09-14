@@ -29,8 +29,14 @@ linters:
       # other os.Getenv call — verified empirically against this repo's
       # golangci-lint v2.13.2. Forbidding os.Getenv outright outside
       # cmd/kraai is the achievable version of "only cmd/kraai reads
-      # KRAAI_DEBUG" and is still correct today (no other package reads any
-      # env var); revisit if a future package legitimately needs one.
+      # KRAAI_DEBUG".
+      #
+      # internal/env is the revisit this note invited. Provider credentials
+      # (CLOUDFLARE_API_TOKEN, NEON_API_KEY) genuinely come from the
+      # environment, and D18's point is that env access is centralized rather
+      # than scattered — which one package owning it satisfies better than
+      # spreading os.Getenv across every provider. It is excluded below for
+      # that reason, not waived.
       forbid:
         - pattern: '^os\.Exit$'
           msg: "os.Exit is only allowed in cmd/kraai's centralized handler (D18)."
@@ -41,6 +47,11 @@ linters:
   exclusions:
     rules:
       - path: ^cmd/kraai/
+        linters:
+          - forbidigo
+      # See the forbidigo note above: this package is the centralized env
+      # reader, so reading the environment is its entire purpose.
+      - path: ^internal/env/
         linters:
           - forbidigo
 
