@@ -133,3 +133,26 @@ func TestDatabaseCapabilityIsEngineAgnostic(t *testing.T) {
 		t.Fatal("an engine name resolved as a capability")
 	}
 }
+
+// TestProvidersVendors covers the map a resource registry resolves against.
+// A registration can condition on a capability other than its own, so
+// answering "does this apply" needs the whole set rather than one entry.
+func TestProvidersVendors(t *testing.T) {
+	p := Providers{
+		Compute:  &Provider{Vendor: "aws"},
+		Database: &Provider{Vendor: "neon"},
+	}
+	got := p.Vendors()
+	if len(got) != 2 || got[CapabilityCompute] != "aws" || got[CapabilityDatabase] != "neon" {
+		t.Fatalf("Vendors() = %v", got)
+	}
+	// An unconfigured capability is absent, not empty-string present: a
+	// condition asking for it must read "not configured", not "configured as
+	// nothing".
+	if _, present := got[CapabilityObjects]; present {
+		t.Fatalf("an unconfigured capability appeared in %v", got)
+	}
+	if got := (Providers{}).Vendors(); len(got) != 0 {
+		t.Fatalf("an empty Providers produced %v", got)
+	}
+}

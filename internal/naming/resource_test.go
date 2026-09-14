@@ -155,3 +155,24 @@ func TestRapid_ResourceName_BoundedAndStable(t *testing.T) {
 		}
 	})
 }
+
+// TestServiceName covers the deployable unit's own name, which ResourceName
+// cannot produce: a service's code is not bound to anything, it is the thing
+// doing the binding.
+func TestServiceName(t *testing.T) {
+	if got := ServiceName("env-a", "api"); got != "env-a-api" {
+		t.Fatalf("got %q, want the 0.5.0 worker shape", got)
+	}
+	// Slugged like every other derived name.
+	if got := ServiceName("env-a", "My Service"); got != "env-a-my-service" {
+		t.Fatalf("got %q", got)
+	}
+	// Truncated, and never left ending in a separator.
+	long := ServiceName("env-a", strings.Repeat("x", 100))
+	if len(long) > 63 {
+		t.Fatalf("got %d chars, want at most 63", len(long))
+	}
+	if strings.HasSuffix(long, "-") {
+		t.Fatalf("truncation left a trailing separator: %q", long)
+	}
+}

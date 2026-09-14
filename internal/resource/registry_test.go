@@ -104,7 +104,7 @@ func TestResolveExpandsOneCapabilityToSeveralTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := r.Resolve("postgres", "neon")
+	got, err := r.Resolve("postgres", map[string]string{"postgres": "neon"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -124,12 +124,12 @@ func TestResolveErrorsNameWhatIsAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := r.Resolve("mysql", "neon")
+	_, err := r.Resolve("mysql", map[string]string{"mysql": "neon"})
 	if err == nil || !strings.Contains(err.Error(), "postgres") {
 		t.Fatalf("got %v, want an error listing the known capabilities", err)
 	}
 
-	_, err = r.Resolve("postgres", "planetscale")
+	_, err = r.Resolve("postgres", map[string]string{"postgres": "planetscale"})
 	if err == nil || !strings.Contains(err.Error(), "neon") {
 		t.Fatalf("got %v, want an error listing the providers for that capability", err)
 	}
@@ -211,7 +211,7 @@ func TestLookupStrategyValid(t *testing.T) {
 // An empty registry must still produce a usable message rather than naming
 // nothing at all.
 func TestResolveOnAnEmptyRegistry(t *testing.T) {
-	_, err := NewRegistry().Resolve("postgres", "neon")
+	_, err := NewRegistry().Resolve("postgres", map[string]string{"postgres": "neon"})
 	if err == nil {
 		t.Fatal("resolving against an empty registry succeeded")
 	}
@@ -235,7 +235,7 @@ func TestResolveErrorsListSeveralOptions(t *testing.T) {
 		}
 	}
 
-	_, err := r.Resolve("mysql", "planetscale")
+	_, err := r.Resolve("mysql", map[string]string{"mysql": "planetscale"})
 	if err == nil {
 		t.Fatal("an unknown capability resolved")
 	}
@@ -243,7 +243,7 @@ func TestResolveErrorsListSeveralOptions(t *testing.T) {
 		t.Fatalf("got %v, want both known capabilities listed", err)
 	}
 
-	_, err = r.Resolve("postgres", "planetscale")
+	_, err = r.Resolve("postgres", map[string]string{"postgres": "planetscale"})
 	if err == nil {
 		t.Fatal("an unknown provider resolved")
 	}
@@ -273,7 +273,7 @@ func TestVendorSelectsAcrossProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := r.Resolve("postgres", "neon")
+	got, err := r.Resolve("postgres", map[string]string{"postgres": "neon"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestVendorSelectsAcrossProviders(t *testing.T) {
 	}
 
 	// The companion is not independently selectable by its own provider name.
-	if _, err := r.Resolve("postgres", "cloudflare"); err == nil {
+	if _, err := r.Resolve("postgres", map[string]string{"postgres": "cloudflare"}); err == nil {
 		t.Fatal("the companion resolved under its provider rather than its vendor")
 	}
 }
@@ -297,7 +297,7 @@ func TestVendorDefaultsToProvider(t *testing.T) {
 	if err := r.Register(reg(t, "cloudflare", "kv_namespace", "keyvalue", PhaseStorage)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := r.Resolve("keyvalue", "cloudflare")
+	got, err := r.Resolve("keyvalue", map[string]string{"keyvalue": "cloudflare"})
 	if err != nil || len(got) != 1 {
 		t.Fatalf("Resolve = %v, %v", got, err)
 	}
@@ -318,11 +318,92 @@ func TestCompetingVendorsStaySeparate(t *testing.T) {
 		}
 	}
 
-	got, err := r.Resolve("postgres", "neon")
+	got, err := r.Resolve("postgres", map[string]string{"postgres": "neon"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].Provider != "neon" {
 		t.Fatalf("choosing neon pulled in %v", got)
+	}
+}
+
+// TestConditionalRegistrationTracksAnotherCapability is why Condition exists.
+// A Cloudflare Hyperdrive config is asked for by choosing Neon for a
+// database, but it is a Workers connection pooler — it belongs only when the
+// compute side is Workers too. Planning one for a Lambda demands a Cloudflare
+// account that deployment has no reason to hold, to create something nothing
+// will ever connect through.
+func TestConditionalRegistrationTracksAnotherCapability(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: PhaseDatabase, Lookup: LookupByAttr, Resource: newStub(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Registration{
+		Provider: "cloudflare", Type: "hyperdrive", Vendor: "neon", Capability: "database",
+		Phase: PhaseStorage, Lookup: LookupByAttr, Resource: newStub(t),
+		When: RequiresCapabilityVendor("compute", "cloudflare"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	onWorkers, err := r.Resolve("database", map[string]string{"database": "neon", "compute": "cloudflare"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(onWorkers) != 2 {
+		t.Fatalf("on Workers: %d type(s), want branch and hyperdrive", len(onWorkers))
+	}
+
+	onLambda, err := r.Resolve("database", map[string]string{"database": "neon", "compute": "aws"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(onLambda) != 1 || onLambda[0].Type != "branch" {
+		t.Fatalf("on AWS: %+v — a Lambda has no use for a Workers pooler", onLambda)
+	}
+
+	// Compute unconfigured is not Cloudflare either.
+	noCompute, err := r.Resolve("database", map[string]string{"database": "neon"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(noCompute) != 1 {
+		t.Fatalf("with no compute vendor: %+v", noCompute)
+	}
+}
+
+// A capability whose every registration is conditioned out is an error, not
+// an empty success: the manifest asked for something no configured
+// combination can supply, and silence would leave a binding unprovisioned.
+func TestResolveFailsWhenEveryRegistrationIsConditionedOut(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(Registration{
+		Provider: "cloudflare", Type: "hyperdrive", Capability: "database",
+		Phase: PhaseStorage, Lookup: LookupByAttr, Resource: newStub(t),
+		When: RequiresCapabilityVendor("compute", "cloudflare"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := r.Resolve("database", map[string]string{"database": "cloudflare", "compute": "aws"})
+	if err == nil {
+		t.Fatal("a capability with no applicable type resolved successfully")
+	}
+	if !strings.Contains(err.Error(), "none of its resource types apply") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Resolve needs a vendor for the capability it is asked about.
+func TestResolveRequiresAVendorForTheCapability(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(reg(t, "neon", "branch", "database", PhaseDatabase)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve("database", map[string]string{"compute": "aws"}); err == nil {
+		t.Fatal("resolved a capability with no vendor configured")
 	}
 }

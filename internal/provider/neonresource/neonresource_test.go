@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evatt-labs/kraai/internal/manifest"
 	"github.com/evatt-labs/kraai/internal/provider/cloudflare"
 	"github.com/evatt-labs/kraai/internal/provider/neon"
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -93,28 +94,45 @@ func TestRegistrationsCoverTheCapability(t *testing.T) {
 		t.Fatalf("hyperdrive registration = %+v", hyper)
 	}
 
-	// One capability expanding to two types, in phase order (D30, D31).
-	//
-	// This assertion previously required exactly one type per provider and
-	// called that correct, which locked in the opposite of what D30 says: a
-	// manifest choosing Neon for Postgres resolved to the branch alone and
-	// never planned the configuration fronting it, leaving a database no
-	// Worker could reach. Both halves come from one choice.
-	resolved, err := reg.Resolve(Capability, "neon")
+	// One capability expanding to two types, in phase order (D30, D31) — but
+	// only when the compute side is Cloudflare. Hyperdrive is a Workers
+	// connection pooler: a Lambda connects to the branch directly over the
+	// Postgres wire and would never route through it, so planning one for an
+	// AWS application demands a Cloudflare account that deployment has no
+	// reason to hold, to create something nothing will ever connect through.
+	onWorkers := map[string]string{
+		manifest.CapabilityDatabase: "neon",
+		manifest.CapabilityCompute:  "cloudflare",
+	}
+	resolved, err := reg.Resolve(Capability, onWorkers)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if len(resolved) != 2 {
-		t.Fatalf("choosing vendor=neon resolved to %d type(s), want the branch and the "+
+		t.Fatalf("on Workers, vendor=neon resolved to %d type(s), want the branch and the "+
 			"hyperdrive config fronting it", len(resolved))
 	}
 	if resolved[0].Type != TypeBranch || resolved[1].Type != TypeHyperdrive {
 		t.Fatalf("resolved out of phase order: %s then %s", resolved[0].Type, resolved[1].Type)
 	}
-	// Hyperdrive is Cloudflare's API but Neon's choice: nothing selects it by
-	// naming Cloudflare as the Postgres vendor.
-	if _, err := reg.Resolve(Capability, "cloudflare"); err == nil {
-		t.Fatal("naming cloudflare as the postgres vendor resolved to something")
+
+	// The same database on AWS is the branch alone.
+	onLambda := map[string]string{
+		manifest.CapabilityDatabase: "neon",
+		manifest.CapabilityCompute:  "aws",
+	}
+	elsewhere, err := reg.Resolve(Capability, onLambda)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(elsewhere) != 1 || elsewhere[0].Type != TypeBranch {
+		t.Fatalf("on AWS, vendor=neon resolved to %+v — a Lambda has no use for a Workers pooler",
+			elsewhere)
+	}
+
+	// Hyperdrive is not independently selectable by its own provider name.
+	if _, err := reg.Resolve(Capability, map[string]string{Capability: "cloudflare"}); err == nil {
+		t.Fatal("naming cloudflare as the database vendor resolved to something")
 	}
 }
 

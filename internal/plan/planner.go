@@ -141,6 +141,25 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 	for _, svcKey := range sortedKeys(m.Services) {
 		svc := m.Services[svcKey]
 
+		// A service is itself a deployable unit, not only a set of bindings.
+		// Its `dir` already says where its code lives, so nothing in the
+		// manifest declares "deploy this" — planning it from the service's
+		// existence is what makes the thing being deployed appear in a plan
+		// at all. Without it, planning an application with two services and a
+		// database reported the database and said nothing about the code.
+		//
+		// Only when a compute vendor is configured: a manifest with no
+		// compute capability describes resources that something else
+		// deploys, and synthesising a compute resource there would invent a
+		// binding its author never asked for.
+		if _, ok := m.Root.Providers.For(manifest.CapabilityCompute); ok {
+			items, err := p.expandCompute(m, environmentName, svcKey, svc)
+			if err != nil {
+				return nil, kerrors.Wrap(err, kerrors.CodeValidation, "services.%s", svcKey)
+			}
+			out = append(out, items...)
+		}
+
 		for _, d := range svc.Databases {
 			config := map[string]any{"driver": d.Driver}
 			if d.Caching != nil {
@@ -178,6 +197,38 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 	return out, nil
 }
 
+// expandCompute plans the service's own deployable unit.
+//
+// It carries the service directory in its config because that is the one
+// thing a compute provider cannot derive: everything else about how to build
+// and deploy comes from providers.compute.settings, but where the code lives
+// is per service.
+func (p *Planner) expandCompute(
+	m *manifest.Manifest, environmentName, svcKey string, svc manifest.Service,
+) ([]plannedItem, error) {
+	regs, err := p.registry.Resolve(manifest.CapabilityCompute, m.Root.Providers.Vendors())
+	if err != nil {
+		return nil, err
+	}
+
+	name := naming.ServiceName(environmentName, svcKey)
+	config := map[string]any{"dir": svc.Dir}
+
+	out := make([]plannedItem, 0, len(regs))
+	for _, r := range regs {
+		out = append(out, plannedItem{
+			Item: Item{
+				ServiceKey: svcKey, Binding: svcKey, Capability: manifest.CapabilityCompute,
+				Provider: r.Provider, Type: r.Type, Phase: r.Phase,
+			},
+			ref:  resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
+			spec: resource.Spec{Binding: svcKey, Name: name, Config: config},
+			res:  r.Resource,
+		})
+	}
+	return out, nil
+}
+
 // annotate names the manifest path a binding-expansion failure came from,
 // so a validation error points at the entry to fix rather than just the
 // underlying registry complaint.
@@ -191,16 +242,15 @@ func annotate(err error, svcKey, kind, binding string) error {
 func (p *Planner) expandBinding(
 	m *manifest.Manifest, environmentName, svcKey, binding, capability string, config map[string]any,
 ) ([]plannedItem, error) {
-	provider, ok := m.Root.Providers.For(capability)
-	if !ok {
+	if _, ok := m.Root.Providers.For(capability); !ok {
 		return nil, kerrors.Validation("no provider is configured for capability %q", capability)
 	}
 
-	// Resolve returns every type the vendor choice implies, across providers:
-	// a Postgres binding on Neon reaches both the branch and the Cloudflare
-	// Hyperdrive configuration fronting it, because the registry keys this by
-	// vendor rather than by which API creates each piece.
-	regs, err := p.registry.Resolve(capability, provider.Vendor)
+	// Resolve takes the whole vendor set, not just this capability's, because
+	// a registration may depend on another: the Cloudflare Hyperdrive config
+	// a Neon database asks for applies only when compute is Cloudflare too,
+	// and answering that needs more than one entry.
+	regs, err := p.registry.Resolve(capability, m.Root.Providers.Vendors())
 	if err != nil {
 		return nil, err
 	}

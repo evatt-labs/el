@@ -59,3 +59,23 @@ func ResourceName(environmentName, serviceKey, binding string) string {
 	}
 	return strings.TrimRight(name[:63], "-")
 }
+
+// ServiceName derives the name of a service's own deployable unit — the
+// Worker, Lambda or container that is the service, as distinct from the
+// resources it binds to.
+//
+// ResourceName cannot serve here: it needs a binding, and a service's code is
+// not bound to anything, it is the thing doing the binding. The shape matches
+// what 0.5.0 deployed its Workers under, `<environment>-<service>`, so an
+// environment's compute and its resources read as one family.
+//
+// Truncated the same way ResourceName is, and for the same reason: a provider
+// that rejects a long name rejects it at create time, far from the manifest
+// that produced it.
+func ServiceName(environmentName, serviceKey string) string {
+	name := environmentName + "-" + slugify(serviceKey)
+	if len(name) <= 63 {
+		return name
+	}
+	return strings.TrimRight(name[:63], "-")
+}
