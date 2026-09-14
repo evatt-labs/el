@@ -142,11 +142,11 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 		svc := m.Services[svcKey]
 
 		for _, d := range svc.Databases {
-			config := map[string]any{"engine": d.Engine}
+			config := map[string]any{"driver": d.Driver}
 			if d.Caching != nil {
 				config["caching"] = *d.Caching
 			}
-			items, err := p.expandBinding(m, environmentName, svcKey, d.Binding, manifest.CapabilityPostgres, config)
+			items, err := p.expandBinding(m, environmentName, svcKey, d.Binding, manifest.CapabilityDatabase, config)
 			if err != nil {
 				return nil, annotate(err, svcKey, "databases", d.Binding)
 			}

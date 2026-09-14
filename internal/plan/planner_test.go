@@ -43,7 +43,7 @@ func TestPlan_CapabilityExpandsToMultipleTypes(t *testing.T) {
 	branch := findAction(t, p, "neon", "branch")
 	hyper := findAction(t, p, "cloudflare", "hyperdrive")
 
-	if branch.Capability != manifest.CapabilityPostgres || hyper.Capability != manifest.CapabilityPostgres {
+	if branch.Capability != manifest.CapabilityDatabase || hyper.Capability != manifest.CapabilityDatabase {
 		t.Fatalf("both expanded types should carry the postgres capability: branch=%q hyper=%q",
 			branch.Capability, hyper.Capability)
 	}
@@ -315,7 +315,7 @@ func TestPlan_EmptyEnvironmentNameIsValidationError(t *testing.T) {
 func TestPlan_UnconfiguredCapabilityIsValidationError(t *testing.T) {
 	f := newRegistryFixture(t)
 	m := &manifest.Manifest{
-		Services: map[string]manifest.Service{"api": {Databases: []manifest.Database{{Binding: "DB", Engine: "postgres"}}}},
+		Services: map[string]manifest.Service{"api": {Databases: []manifest.Database{{Binding: "DB", Driver: "postgres"}}}},
 	}
 	_, err := New(f.reg).Plan(context.Background(), m, envName)
 	assertValidationError(t, err, "services.api.databases.DB")
@@ -324,9 +324,9 @@ func TestPlan_UnconfiguredCapabilityIsValidationError(t *testing.T) {
 func TestPlan_UnknownVendorIsValidationError(t *testing.T) {
 	f := newRegistryFixture(t)
 	m := &manifest.Manifest{
-		Root: manifest.Root{Providers: manifest.Providers{Postgres: &manifest.Provider{Vendor: "aws"}}},
+		Root: manifest.Root{Providers: manifest.Providers{Database: &manifest.Provider{Vendor: "aws"}}},
 		Services: map[string]manifest.Service{
-			"api": {Databases: []manifest.Database{{Binding: "DB", Engine: "postgres"}}},
+			"api": {Databases: []manifest.Database{{Binding: "DB", Driver: "postgres"}}},
 		},
 	}
 	_, err := New(f.reg).Plan(context.Background(), m, envName)
@@ -359,10 +359,10 @@ func TestPlan_UnconfiguredCapability_EveryBindingKind(t *testing.T) {
 func TestPlan_DatabaseCachingIsCarriedIntoConfig(t *testing.T) {
 	f := newRegistryFixture(t)
 	m := &manifest.Manifest{
-		Root: manifest.Root{Providers: manifest.Providers{Postgres: &manifest.Provider{Vendor: "neon"}}},
+		Root: manifest.Root{Providers: manifest.Providers{Database: &manifest.Provider{Vendor: "neon"}}},
 		Services: map[string]manifest.Service{
 			"api": {Databases: []manifest.Database{{
-				Binding: "DB", Engine: "postgres", Caching: &manifest.Caching{Disabled: true, MaxAge: 30},
+				Binding: "DB", Driver: "postgres", Caching: &manifest.Caching{Disabled: true, MaxAge: 30},
 			}}},
 		},
 	}

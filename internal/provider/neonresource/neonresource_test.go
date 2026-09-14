@@ -643,3 +643,24 @@ func TestHyperdriveCreateRequiresADerivedName(t *testing.T) {
 		t.Fatal("the API was called despite the missing name")
 	}
 }
+
+// The mirror of D1's check: a binding asking for something other than
+// Postgres must not be quietly given a Postgres branch.
+func TestBranchRejectsAMismatchedDriver(t *testing.T) {
+	nc, seen := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+
+	_, err := b.Create(t.Context(), resource.Spec{
+		Binding: "DB", Name: "env-a",
+		Config: map[string]any{"driver": "sqlite"},
+	})
+	if err == nil {
+		t.Fatal("a sqlite binding was silently provisioned as Postgres")
+	}
+	if !strings.Contains(err.Error(), "sqlite") || !strings.Contains(err.Error(), Driver) {
+		t.Fatalf("error should name both drivers: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called despite the mismatch")
+	}
+}

@@ -13,6 +13,8 @@ package neonresource
 import (
 	"context"
 
+	"github.com/evatt-labs/kraai/internal/manifest"
+
 	"github.com/evatt-labs/kraai/internal/kerrors"
 	"github.com/evatt-labs/kraai/internal/provider/neon"
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -22,8 +24,11 @@ import (
 const (
 	Provider   = "neon"
 	TypeBranch = "branch"
-	// Capability is what both types here fulfil.
-	Capability = "postgres"
+	// Capability is what both types here fulfil. Taken from the manifest's
+	// vocabulary rather than spelled again, so the two cannot drift — which
+	// they already did once, leaving Cloudflare D1 registered under a
+	// capability no manifest could name.
+	Capability = manifest.CapabilityDatabase
 	// SecretConnectionURI is the credential a branch produces and the
 	// Hyperdrive configuration consumes.
 	SecretConnectionURI = "connection_uri"
@@ -47,6 +52,33 @@ type BranchSettings struct {
 	// OrgID is optional. /projects refuses to list without an organization,
 	// and a caller that has already resolved it skips a lookup by passing it.
 	OrgID string
+}
+
+// Driver is the wire protocol a service reaches this database through. A
+// Neon branch is Postgres-wire, which is the whole reason an application can
+// use it without knowing Neon exists.
+const Driver = "postgres"
+
+// checkDriver rejects a binding asking to connect over a protocol this
+// provider does not speak.
+//
+// The capability says "database" and the vendor says who provides it, so the
+// driver is the only thing left saying what the application will actually
+// connect with. Without this check, a binding declaring postgres under a
+// vendor that speaks something else would get that something else silently —
+// and the failure would surface as a connection error from library code far
+// from the manifest that caused it.
+//
+// An unstated driver is accepted: the field is optional, and a service that
+// states nothing has not stated a conflict.
+func checkDriver(config map[string]any) error {
+	declared := str(config, "driver")
+	if declared == "" || declared == Driver {
+		return nil
+	}
+	return kerrors.Validation(
+		"this database binding declares driver %q, but the configured vendor speaks %s — "+
+			"change the driver or the vendor", declared, Driver)
 }
 
 // decodeSettings reads BranchSettings out of a Spec's config.
@@ -121,6 +153,9 @@ func (b *branchResource) Get(ctx context.Context, ref resource.Ref) (*resource.S
 func (b *branchResource) Create(ctx context.Context, spec resource.Spec) (*resource.State, error) {
 	if spec.Name == "" {
 		return nil, kerrors.Validation("cannot create a neon branch for binding %q without a derived name", spec.Binding)
+	}
+	if err := checkDriver(spec.Config); err != nil {
+		return nil, err
 	}
 	project, err := b.resolveProject(ctx)
 	if err != nil {

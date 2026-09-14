@@ -3,7 +3,7 @@ version: 1
 providers:
   compute:
     vendor: cloudflare
-  postgres:
+  database:
     vendor: neon
     settings:
       project: kraai-control-plane

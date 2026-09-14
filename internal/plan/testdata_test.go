@@ -35,7 +35,7 @@ func newRegistryFixture(t *testing.T) *registryFixture {
 
 	regs := []resource.Registration{
 		{
-			Provider: "neon", Type: "branch", Capability: manifest.CapabilityPostgres,
+			Provider: "neon", Type: "branch", Capability: manifest.CapabilityDatabase,
 			Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr, Resource: f.branch,
 		},
 		{
@@ -46,7 +46,7 @@ func newRegistryFixture(t *testing.T) *registryFixture {
 			// Postgres is what asks for it, so Vendor says neon — without
 			// which one vendor choice reaches only half the capability.
 			Provider: "cloudflare", Type: "hyperdrive", Vendor: "neon",
-			Capability: manifest.CapabilityPostgres,
+			Capability: manifest.CapabilityDatabase,
 			Phase:      resource.PhaseStorage, Lookup: resource.LookupByAttr, Resource: f.hyperdrive,
 		},
 		{
@@ -74,7 +74,7 @@ func newRegistryFixture(t *testing.T) *registryFixture {
 // callers don't repeat the same four lines in every test.
 func (f *registryFixture) providers() manifest.Providers {
 	return manifest.Providers{
-		Postgres: &manifest.Provider{Vendor: "neon"},
+		Database: &manifest.Provider{Vendor: "neon"},
 		KeyValue: &manifest.Provider{Vendor: "cloudflare"},
 		Objects:  &manifest.Provider{Vendor: "cloudflare"},
 		Queues:   &manifest.Provider{Vendor: "cloudflare"},
@@ -88,7 +88,7 @@ func (f *registryFixture) oneServiceManifest() *manifest.Manifest {
 		Root: manifest.Root{Providers: f.providers()},
 		Services: map[string]manifest.Service{
 			"api": {
-				Databases: []manifest.Database{{Binding: "DB", Engine: "postgres"}},
+				Databases: []manifest.Database{{Binding: "DB", Driver: "postgres"}},
 				KeyValue:  []manifest.KeyValue{{Binding: "CACHE"}},
 				Objects:   []manifest.ObjectStore{{Binding: "UPLOADS"}},
 				Queues:    []manifest.Queue{{Binding: "JOBS", Consumer: true}},
