@@ -1,0 +1,638 @@
+package neonresource
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/evatt-labs/kraai/internal/provider/cloudflare"
+	"github.com/evatt-labs/kraai/internal/provider/neon"
+	"github.com/evatt-labs/kraai/internal/resource"
+)
+
+type call struct {
+	method string
+	path   string
+	query  string
+	body   map[string]any
+}
+
+func fakeAPI(t *testing.T, handler func(call) (int, string)) (*httptest.Server, *[]call) {
+	t.Helper()
+	var seen []call
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := call{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery}
+		if r.Body != nil {
+			var decoded map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&decoded)
+			c.body = decoded
+		}
+		seen = append(seen, c)
+		status, payload := handler(c)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(payload))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+func settings() BranchSettings {
+	return BranchSettings{Project: "my-project", Database: "appdb", Role: "app", OrgID: "org-1"}
+}
+
+// neonClient serves the project and branch endpoints a branch adapter walks.
+func neonClient(t *testing.T, handler func(call) (int, string)) (*neon.Client, *[]call) {
+	t.Helper()
+	srv, seen := fakeAPI(t, handler)
+	return neon.New("key", neon.WithBaseURL(srv.URL), neon.WithHTTPClient(srv.Client())), seen
+}
+
+func cfClient(t *testing.T, handler func(call) (int, string)) (*cloudflare.Client, *[]call) {
+	t.Helper()
+	srv, seen := fakeAPI(t, handler)
+	return cloudflare.New("tok", "acct", cloudflare.WithBaseURL(srv.URL), cloudflare.WithHTTPClient(srv.Client())), seen
+}
+
+func cfOK(result string) (int, string) {
+	return 200, `{"success":true,"errors":[],"result":` + result + `}`
+}
+
+// standardNeon answers the project lookup and a branch listing.
+func standardNeon(branches string) func(call) (int, string) {
+	return func(c call) (int, string) {
+		switch {
+		case strings.HasSuffix(c.path, "/projects"):
+			return 200, `{"projects":[{"id":"p-1","name":"my-project","org_id":"org-1"}],"pagination":{"cursor":""}}`
+		case strings.HasSuffix(c.path, "/branches") && c.method == "GET":
+			return 200, `{"branches":` + branches + `,"pagination":{"cursor":""}}`
+		}
+		return 200, `{}`
+	}
+}
+
+func TestRegistrationsCoverTheCapability(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	cc, _ := cfClient(t, func(call) (int, string) { return cfOK(`[]`) })
+
+	reg := resource.NewRegistry()
+	if err := Register(reg, nc, cc, settings()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	branch, ok := reg.Lookup("neon/branch")
+	if !ok || branch.Phase != resource.PhaseDatabase || branch.Capability != Capability {
+		t.Fatalf("branch registration = %+v", branch)
+	}
+	hyper, ok := reg.Lookup("cloudflare/hyperdrive")
+	if !ok || hyper.Phase != resource.PhaseStorage || hyper.Capability != Capability {
+		t.Fatalf("hyperdrive registration = %+v", hyper)
+	}
+
+	// One capability expanding to two types, in phase order — the branch must
+	// exist before anything fronts it (D30, D31).
+	resolved, err := reg.Resolve(Capability, "neon")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0].Type != TypeBranch {
+		t.Fatalf("neon resolves to %+v", resolved)
+	}
+	fronted, err := reg.Resolve(Capability, "cloudflare")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(fronted) != 1 || fronted[0].Type != TypeHyperdrive {
+		t.Fatalf("cloudflare resolves to %+v", fronted)
+	}
+}
+
+func TestBranchCreateForksTheDefault(t *testing.T) {
+	nc, seen := neonClient(t, func(c call) (int, string) {
+		switch {
+		case strings.HasSuffix(c.path, "/projects"):
+			return 200, `{"projects":[{"id":"p-1","name":"my-project","org_id":"org-1"}],"pagination":{"cursor":""}}`
+		case c.method == "GET" && strings.HasSuffix(c.path, "/branches"):
+			return 200, `{"branches":[{"id":"br-main","name":"main","default":true}],"pagination":{"cursor":""}}`
+		case c.method == "POST":
+			return 201, `{"branch":{"id":"br-new","name":"env-a","parent_id":"br-main"}}`
+		}
+		return 200, `{}`
+	})
+
+	b := &branchResource{client: nc, settings: settings()}
+	state, err := b.Create(t.Context(), resource.Spec{Binding: "DB", Name: "env-a"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if state.ID != "br-new" {
+		t.Fatalf("state = %+v", state)
+	}
+	if state.Attributes["projectId"] != "p-1" {
+		t.Fatalf("attributes lost the project: %+v", state.Attributes)
+	}
+
+	var created *call
+	for i := range *seen {
+		if (*seen)[i].method == "POST" {
+			created = &(*seen)[i]
+		}
+	}
+	body, _ := created.body["branch"].(map[string]any)
+	if body["parent_id"] != "br-main" {
+		t.Fatalf("branched from %v, want the project's default branch", body["parent_id"])
+	}
+}
+
+func TestBranchGetAbsentIsNothing(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+
+	state, err := b.Get(t.Context(), resource.Ref{Name: "env-a"})
+	if err != nil {
+		t.Fatalf("an absent branch should not be an error: %v", err)
+	}
+	if state != nil {
+		t.Fatalf("state = %+v, want nil", state)
+	}
+}
+
+// A missing project is configuration pointing at something that should
+// already exist — a misconfiguration, not a resource waiting to be created.
+func TestBranchMissingProjectIsAnError(t *testing.T) {
+	nc, _ := neonClient(t, func(call) (int, string) {
+		return 200, `{"projects":[],"pagination":{"cursor":""}}`
+	})
+	b := &branchResource{client: nc, settings: settings()}
+
+	if _, err := b.Get(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+		t.Fatal("a missing project was reported as an absent branch")
+	}
+	if err := b.Delete(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+		t.Fatal("teardown treated a missing project as success")
+	}
+	if _, err := b.Create(t.Context(), resource.Spec{Binding: "DB", Name: "env-a"}); err == nil {
+		t.Fatal("create against a missing project succeeded")
+	}
+}
+
+func TestBranchDeleteAbsentIsSuccess(t *testing.T) {
+	nc, seen := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+
+	if err := b.Delete(t.Context(), resource.Ref{Name: "env-a"}); err != nil {
+		t.Fatalf("deleting an absent branch failed: %v", err)
+	}
+	for _, c := range *seen {
+		if c.method == "DELETE" {
+			t.Fatal("a delete was issued for a branch that does not exist")
+		}
+	}
+}
+
+func TestBranchUpdateIsRefused(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+
+	_, err := b.Update(t.Context(), resource.Ref{Name: "env-a"}, resource.Spec{Binding: "DB"})
+	if !errors.Is(err, resource.ErrImmutable) {
+		t.Fatalf("got %v, want ErrImmutable", err)
+	}
+}
+
+// TestBranchStateCarriesNoCredential is the property the whole design turns
+// on: what reaches the lockfile has never held a connection string.
+func TestBranchStateCarriesNoCredential(t *testing.T) {
+	const secret = "hunter2"
+	nc, _ := neonClient(t, func(c call) (int, string) {
+		switch {
+		case strings.HasSuffix(c.path, "/projects"):
+			return 200, `{"projects":[{"id":"p-1","name":"my-project"}],"pagination":{"cursor":""}}`
+		case strings.HasSuffix(c.path, "/connection_uri"):
+			return 200, `{"uri":"postgresql://app:` + secret + `@ep-x.neon.tech/appdb"}`
+		}
+		return 200, `{"branches":[{"id":"br-1","name":"env-a"}],"pagination":{"cursor":""}}`
+	})
+	b := &branchResource{client: nc, settings: settings()}
+
+	state, err := b.Get(t.Context(), resource.Ref{Name: "env-a"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("the credential reached serialised state: %s", encoded)
+	}
+
+	// And it is still reachable through the producer.
+	secrets := b.Secrets(state)
+	uri, err := secrets[SecretConnectionURI](t.Context())
+	if err != nil {
+		t.Fatalf("connection URI producer: %v", err)
+	}
+	if !strings.Contains(uri, secret) {
+		t.Fatalf("producer returned %q", uri)
+	}
+}
+
+func TestBranchSecretsRequestsTheDirectEndpoint(t *testing.T) {
+	var uriCall *call
+	nc, seen := neonClient(t, func(c call) (int, string) {
+		if strings.HasSuffix(c.path, "/connection_uri") {
+			return 200, `{"uri":"postgresql://a:b@h/d"}`
+		}
+		return 200, `{"projects":[{"id":"p-1","name":"my-project"}],"pagination":{"cursor":""}}`
+	})
+	b := &branchResource{client: nc, settings: settings()}
+
+	state := &resource.State{ID: "br-1", Attributes: map[string]any{"projectId": "p-1"}}
+	if _, err := b.Secrets(state)[SecretConnectionURI](t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for i := range *seen {
+		if strings.HasSuffix((*seen)[i].path, "/connection_uri") {
+			uriCall = &(*seen)[i]
+		}
+	}
+	// Hyperdrive pools in front of this, so the direct endpoint is correct.
+	if !strings.Contains(uriCall.query, "pooled=false") {
+		t.Fatalf("query = %q, want the direct endpoint", uriCall.query)
+	}
+	if !strings.Contains(uriCall.query, "database_name=appdb") || !strings.Contains(uriCall.query, "role_name=app") {
+		t.Fatalf("query = %q, want the configured database and role", uriCall.query)
+	}
+}
+
+func TestBranchSecretsOnNilState(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+	if b.Secrets(nil) != nil {
+		t.Fatal("secrets were offered for a resource with no state")
+	}
+}
+
+// TestHyperdriveCreateConsumesTheProducer exercises Spec.Secrets end to end:
+// the credential arrives as a function, is used inside Create, and appears
+// nowhere else.
+func TestHyperdriveCreateConsumesTheProducer(t *testing.T) {
+	const password = "hunter2"
+	cc, seen := cfClient(t, func(c call) (int, string) {
+		if c.method == "POST" {
+			return cfOK(`{"id":"hd-1","name":"env-a-api-db"}`)
+		}
+		return cfOK(`[]`)
+	})
+	h := &hyperdriveResource{client: cc}
+
+	var produced int
+	state, err := h.Create(t.Context(), resource.Spec{
+		Binding: "DB", Name: "env-a-api-db",
+		Secrets: map[string]resource.Secret{
+			SecretConnectionURI: func(context.Context) (string, error) {
+				produced++
+				return "postgresql://app:" + password + "@ep-x.neon.tech:5432/appdb?sslmode=verify-full", nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if produced != 1 {
+		t.Fatalf("the credential producer ran %d times, want once at the point of use", produced)
+	}
+	if state.ID != "hd-1" {
+		t.Fatalf("state = %+v", state)
+	}
+
+	// The password reaches Cloudflare in the request body, split into fields.
+	origin, _ := (*seen)[0].body["origin"].(map[string]any)
+	if origin["password"] != password {
+		t.Fatalf("origin = %+v, want the resolved password", origin)
+	}
+	if origin["host"] != "ep-x.neon.tech" || origin["database"] != "appdb" || origin["user"] != "app" {
+		t.Fatalf("origin fields = %+v", origin)
+	}
+	if origin["port"] != float64(5432) {
+		t.Fatalf("port = %v, want a number", origin["port"])
+	}
+	mtls, _ := (*seen)[0].body["mtls"].(map[string]any)
+	if mtls["sslmode"] != "verify-full" {
+		t.Fatalf("sslmode = %v, want the URI's own", mtls["sslmode"])
+	}
+
+	// And nowhere in the state that reaches the lockfile.
+	encoded, _ := json.Marshal(state)
+	if strings.Contains(string(encoded), password) {
+		t.Fatalf("the credential reached serialised state: %s", encoded)
+	}
+}
+
+func TestHyperdriveCreateWithoutTheSecretFails(t *testing.T) {
+	cc, seen := cfClient(t, func(call) (int, string) { return cfOK(`{}`) })
+	h := &hyperdriveResource{client: cc}
+
+	_, err := h.Create(t.Context(), resource.Spec{Binding: "DB", Name: "env-a-api-db"})
+	if err == nil {
+		t.Fatal("a hyperdrive config was created with no connection string")
+	}
+	if !strings.Contains(err.Error(), SecretConnectionURI) {
+		t.Fatalf("error should name the missing credential: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called despite the missing credential")
+	}
+}
+
+func TestHyperdriveCreateRejectsAnUnparseableURI(t *testing.T) {
+	cc, seen := cfClient(t, func(call) (int, string) { return cfOK(`{}`) })
+	h := &hyperdriveResource{client: cc}
+
+	_, err := h.Create(t.Context(), resource.Spec{
+		Binding: "DB", Name: "env-a-api-db",
+		Secrets: map[string]resource.Secret{
+			SecretConnectionURI: func(context.Context) (string, error) { return "not-a-uri", nil },
+		},
+	})
+	if err == nil {
+		t.Fatal("an unparseable connection string was accepted")
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called with an unparsed connection")
+	}
+}
+
+func TestHyperdriveGetDeleteAndUpdate(t *testing.T) {
+	var deleted string
+	cc, _ := cfClient(t, func(c call) (int, string) {
+		if c.method == "DELETE" {
+			deleted = c.path
+			return cfOK(`{}`)
+		}
+		return cfOK(`[{"id":"hd-9","name":"env-a-api-db"}]`)
+	})
+	h := &hyperdriveResource{client: cc}
+
+	state, err := h.Get(t.Context(), resource.Ref{Name: "env-a-api-db"})
+	if err != nil || state == nil || state.ID != "hd-9" {
+		t.Fatalf("Get = %+v, %v", state, err)
+	}
+	if err := h.Delete(t.Context(), resource.Ref{Name: "env-a-api-db"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !strings.HasSuffix(deleted, "/hd-9") {
+		t.Fatalf("deleted %q, want the looked-up id", deleted)
+	}
+
+	_, err = h.Update(t.Context(), resource.Ref{Name: "n"}, resource.Spec{Binding: "DB"})
+	if !errors.Is(err, resource.ErrImmutable) {
+		t.Fatalf("Update returned %v, want ErrImmutable", err)
+	}
+}
+
+func TestHyperdriveAbsentIsNothing(t *testing.T) {
+	cc, seen := cfClient(t, func(call) (int, string) { return cfOK(`[]`) })
+	h := &hyperdriveResource{client: cc}
+
+	state, err := h.Get(t.Context(), resource.Ref{Name: "missing"})
+	if err != nil || state != nil {
+		t.Fatalf("Get = %+v, %v", state, err)
+	}
+	if err := h.Delete(t.Context(), resource.Ref{Name: "missing"}); err != nil {
+		t.Fatalf("deleting an absent config failed: %v", err)
+	}
+	for _, c := range *seen {
+		if c.method == "DELETE" {
+			t.Fatal("a delete was issued for a config that does not exist")
+		}
+	}
+}
+
+func TestDecodeSettings(t *testing.T) {
+	got, err := DecodeSettings(map[string]any{
+		"project": "p", "database": "d", "role": "r", "orgId": "o",
+	})
+	if err != nil {
+		t.Fatalf("DecodeSettings: %v", err)
+	}
+	if got != (BranchSettings{Project: "p", Database: "d", Role: "r", OrgID: "o"}) {
+		t.Fatalf("settings = %+v", got)
+	}
+
+	// orgId is genuinely optional; the rest are not, and the error names
+	// every missing one at once.
+	if _, err := DecodeSettings(map[string]any{"project": "p", "database": "d", "role": "r"}); err != nil {
+		t.Fatalf("orgId should be optional: %v", err)
+	}
+	_, err = DecodeSettings(map[string]any{"project": "p"})
+	if err == nil {
+		t.Fatal("missing settings were accepted")
+	}
+	for _, want := range []string{"database", "role"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q: %v", want, err)
+		}
+	}
+}
+
+func TestRegisterIsAllOrNothing(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	cc, _ := cfClient(t, func(call) (int, string) { return cfOK(`[]`) })
+
+	reg := resource.NewRegistry()
+	if err := Register(reg, nc, cc, settings()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, nc, cc, settings()); err == nil {
+		t.Fatal("registering twice succeeded")
+	}
+	if len(reg.All()) != 2 {
+		t.Fatalf("registry holds %d types, want 2", len(reg.All()))
+	}
+}
+
+// Every API failure along a multi-step path must surface rather than being
+// read as absence — teardown treating an outage as "already deleted" would
+// clear a lockfile whose resources still exist.
+func TestAPIFailuresSurfaceAtEveryStep(t *testing.T) {
+	t.Run("branch listing fails", func(t *testing.T) {
+		nc, _ := neonClient(t, func(c call) (int, string) {
+			if strings.HasSuffix(c.path, "/projects") {
+				return 200, `{"projects":[{"id":"p-1","name":"my-project"}],"pagination":{"cursor":""}}`
+			}
+			return 503, `{"code":"UNAVAILABLE","message":"down"}`
+		})
+		b := &branchResource{client: nc, settings: settings()}
+
+		if _, err := b.Get(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+			t.Error("an outage was reported as an absent branch")
+		}
+		if err := b.Delete(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+			t.Error("an outage during teardown was reported as success")
+		}
+		if _, err := b.Create(t.Context(), resource.Spec{Binding: "DB", Name: "env-a"}); err == nil {
+			t.Error("create succeeded despite a failing default-branch lookup")
+		}
+	})
+
+	t.Run("branch create fails", func(t *testing.T) {
+		nc, _ := neonClient(t, func(c call) (int, string) {
+			switch {
+			case strings.HasSuffix(c.path, "/projects"):
+				return 200, `{"projects":[{"id":"p-1","name":"my-project"}],"pagination":{"cursor":""}}`
+			case c.method == "POST":
+				return 409, `{"code":"CONFLICT","message":"exists"}`
+			}
+			return 200, `{"branches":[{"id":"br-main","name":"main","default":true}],"pagination":{"cursor":""}}`
+		})
+		b := &branchResource{client: nc, settings: settings()}
+
+		if _, err := b.Create(t.Context(), resource.Spec{Binding: "DB", Name: "env-a"}); err == nil {
+			t.Error("a failed create reported success")
+		}
+	})
+
+	t.Run("branch delete fails", func(t *testing.T) {
+		nc, _ := neonClient(t, func(c call) (int, string) {
+			switch {
+			case strings.HasSuffix(c.path, "/projects"):
+				return 200, `{"projects":[{"id":"p-1","name":"my-project"}],"pagination":{"cursor":""}}`
+			case c.method == "DELETE":
+				return 500, `{"code":"ERR","message":"nope"}`
+			}
+			return 200, `{"branches":[{"id":"br-1","name":"env-a"}],"pagination":{"cursor":""}}`
+		})
+		b := &branchResource{client: nc, settings: settings()}
+
+		if err := b.Delete(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+			t.Error("a failed delete reported success")
+		}
+	})
+
+	t.Run("hyperdrive lookups fail", func(t *testing.T) {
+		cc, _ := cfClient(t, func(call) (int, string) {
+			return 503, `{"success":false,"errors":[{"code":1,"message":"down"}]}`
+		})
+		h := &hyperdriveResource{client: cc}
+
+		if _, err := h.Get(t.Context(), resource.Ref{Name: "n"}); err == nil {
+			t.Error("an outage was reported as an absent config")
+		}
+		if err := h.Delete(t.Context(), resource.Ref{Name: "n"}); err == nil {
+			t.Error("an outage during teardown was reported as success")
+		}
+	})
+
+	t.Run("hyperdrive delete fails", func(t *testing.T) {
+		cc, _ := cfClient(t, func(c call) (int, string) {
+			if c.method == "DELETE" {
+				return 500, `{"success":false,"errors":[{"code":1,"message":"nope"}]}`
+			}
+			return cfOK(`[{"id":"hd-1","name":"env-a"}]`)
+		})
+		h := &hyperdriveResource{client: cc}
+
+		if err := h.Delete(t.Context(), resource.Ref{Name: "env-a"}); err == nil {
+			t.Error("a failed delete reported success")
+		}
+	})
+
+	t.Run("hyperdrive create fails", func(t *testing.T) {
+		cc, _ := cfClient(t, func(call) (int, string) {
+			return 400, `{"success":false,"errors":[{"code":1,"message":"bad origin"}]}`
+		})
+		h := &hyperdriveResource{client: cc}
+
+		_, err := h.Create(t.Context(), resource.Spec{
+			Binding: "DB", Name: "env-a",
+			Secrets: map[string]resource.Secret{
+				SecretConnectionURI: func(context.Context) (string, error) {
+					return "postgresql://a:b@h:5432/d", nil
+				},
+			},
+		})
+		if err == nil {
+			t.Error("a failed create reported success")
+		}
+	})
+}
+
+// A producer that cannot fetch the credential must stop the create rather
+// than sending an empty origin to Cloudflare.
+func TestHyperdriveFailingProducerStopsCreate(t *testing.T) {
+	cc, seen := cfClient(t, func(call) (int, string) { return cfOK(`{}`) })
+	h := &hyperdriveResource{client: cc}
+
+	_, err := h.Create(t.Context(), resource.Spec{
+		Binding: "DB", Name: "env-a",
+		Secrets: map[string]resource.Secret{
+			SecretConnectionURI: func(context.Context) (string, error) {
+				return "", errors.New("neon refused")
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("a failing credential producer did not stop the create")
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called without a connection string")
+	}
+}
+
+func TestBranchCreateRequiresADerivedName(t *testing.T) {
+	nc, seen := neonClient(t, standardNeon(`[]`))
+	b := &branchResource{client: nc, settings: settings()}
+
+	if _, err := b.Create(t.Context(), resource.Spec{Binding: "DB"}); err == nil {
+		t.Fatal("a branch was created with no derived name")
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called despite the missing name")
+	}
+}
+
+func TestDecodeSettingsNamesEveryMissingField(t *testing.T) {
+	_, err := DecodeSettings(map[string]any{})
+	if err == nil {
+		t.Fatal("empty settings were accepted")
+	}
+	for _, want := range []string{"project", "database", "role"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q: %v", want, err)
+		}
+	}
+}
+
+// Creating without a derived name would produce a config nothing can find
+// again, so it fails before the credential is even resolved.
+func TestHyperdriveCreateRequiresADerivedName(t *testing.T) {
+	cc, seen := cfClient(t, func(call) (int, string) { return cfOK(`{}`) })
+	h := &hyperdriveResource{client: cc}
+
+	var produced int
+	_, err := h.Create(t.Context(), resource.Spec{
+		Binding: "DB",
+		Secrets: map[string]resource.Secret{
+			SecretConnectionURI: func(context.Context) (string, error) {
+				produced++
+				return "postgresql://a:b@h:5432/d", nil
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("a hyperdrive config was created with no derived name")
+	}
+	if produced != 0 {
+		t.Fatal("the credential was fetched before the name was validated")
+	}
+	if len(*seen) != 0 {
+		t.Fatal("the API was called despite the missing name")
+	}
+}
