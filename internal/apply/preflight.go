@@ -1,0 +1,55 @@
+package apply
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/evatt-labs/kraai/internal/kerrors"
+	"github.com/evatt-labs/kraai/internal/plan"
+)
+
+// preflight walks the whole plan before Apply touches anything, and refuses
+// the run outright if either condition in the package doc's "The pre-flight
+// gate" section holds. Returning early here, before a single Create/Delete
+// call is made, is what keeps a refusal cheap: nothing has to be rolled
+// back, because nothing happened.
+func preflight(p *plan.Plan, allowReplace bool) error {
+	var failed, blockedReplace []string
+
+	for _, a := range p.Actions {
+		switch a.Kind {
+		case plan.ActionFailed:
+			failed = append(failed, describeAction(a))
+		case plan.ActionReplace:
+			if !allowReplace {
+				blockedReplace = append(blockedReplace, describeAction(a))
+			}
+		}
+	}
+
+	if len(failed) == 0 && len(blockedReplace) == 0 {
+		return nil
+	}
+
+	var reasons []string
+	if len(failed) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d resource(s) could not be read, so kraai does not know whether they exist "+
+				"and cannot safely create, replace, or skip them: %s",
+			len(failed), strings.Join(failed, ", ")))
+	}
+	if len(blockedReplace) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d resource(s) require replacement (delete then create) but --replace was not "+
+				"passed: %s", len(blockedReplace), strings.Join(blockedReplace, ", ")))
+	}
+
+	return kerrors.Validation("apply refused before making any changes: %s", strings.Join(reasons, "; "))
+}
+
+// describeAction names one action the way an operator would look it up in
+// the manifest and the way they would look it up in the provider's own
+// console: service and binding, then provider/type and the derived name.
+func describeAction(a plan.Action) string {
+	return fmt.Sprintf("%s.%s (%s/%s %q)", a.ServiceKey, a.Binding, a.Provider, a.Type, a.Ref.Name)
+}
