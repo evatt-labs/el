@@ -102,6 +102,22 @@ func (p Providers) For(capability string) (*Provider, bool) {
 	return configured, true
 }
 
+// Vendors maps each configured capability to the vendor fulfilling it.
+//
+// This is what a resource registry resolves against: a registration can
+// declare a condition on a capability other than its own — a Cloudflare
+// Hyperdrive config belongs to a database binding but only applies when
+// compute is also Cloudflare — and answering that needs the whole set, not
+// one entry.
+func (p Providers) Vendors() map[string]string {
+	out := make(map[string]string, 5)
+	for _, capability := range p.Capabilities() {
+		configured, _ := p.For(capability)
+		out[capability] = configured.Vendor
+	}
+	return out
+}
+
 // Capabilities returns the capabilities this manifest configures, in a stable
 // order.
 func (p Providers) Capabilities() []string {

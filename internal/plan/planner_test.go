@@ -511,3 +511,92 @@ func TestPostgresExpandsAcrossProviders(t *testing.T) {
 		t.Fatalf("Get calls: branch=%d hyperdrive=%d", f.branch.getCalls, f.hyperdrive.getCalls)
 	}
 }
+
+// TestEveryServiceIsPlannedAsDeployable: a service is itself a deployable
+// unit, not only a set of bindings. Before this, planning an application with
+// two services and a database reported the database and said nothing about
+// the code that was the point of deploying it.
+func TestEveryServiceIsPlannedAsDeployable(t *testing.T) {
+	f := newRegistryFixture(t)
+	compute := newFakeResource()
+	if err := f.reg.Register(resource.Registration{
+		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
+		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := f.oneServiceManifest()
+	m.Root.Providers.Compute = &manifest.Provider{Vendor: "aws"}
+	m.Services["worker"] = manifest.Service{Dir: "services/worker"}
+
+	got, err := New(f.reg).Plan(t.Context(), m, "env-a")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	var names []string
+	for _, a := range got.Actions {
+		if a.Capability == manifest.CapabilityCompute {
+			names = append(names, a.Ref.Name)
+		}
+	}
+	if len(names) != 2 {
+		t.Fatalf("planned %d compute resources for 2 services: %v", len(names), names)
+	}
+	// Named <environment>-<service>, matching what 0.5.0 deployed Workers as.
+	want := map[string]bool{"env-a-api": true, "env-a-worker": true}
+	for _, n := range names {
+		if !want[n] {
+			t.Errorf("unexpected compute name %q", n)
+		}
+	}
+
+	// A service with no bindings at all still gets its code planned.
+	var workerCompute bool
+	for _, a := range got.Actions {
+		if a.ServiceKey == "worker" && a.Capability == manifest.CapabilityCompute {
+			workerCompute = true
+			// The directory is the one thing a compute provider cannot derive.
+			if a.Spec.Config["dir"] != "services/worker" {
+				t.Errorf("compute spec lost the service directory: %+v", a.Spec.Config)
+			}
+		}
+	}
+	if !workerCompute {
+		t.Error("a service declaring no bindings was not planned at all")
+	}
+}
+
+// A manifest with no compute vendor describes resources something else
+// deploys. Synthesising compute there would invent a binding its author never
+// asked for — kraai-web is exactly this shape.
+func TestNoComputeVendorPlansNoCompute(t *testing.T) {
+	f := newRegistryFixture(t)
+
+	got, err := New(f.reg).Plan(t.Context(), f.oneServiceManifest(), "env-a")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for _, a := range got.Actions {
+		if a.Capability == manifest.CapabilityCompute {
+			t.Fatalf("planned compute with no compute vendor configured: %+v", a)
+		}
+	}
+}
+
+// A compute vendor the registry has nothing for must fail the walk naming the
+// service, not plan the bindings and silently omit the code.
+func TestUnresolvableComputeFailsTheWalk(t *testing.T) {
+	f := newRegistryFixture(t)
+	m := f.oneServiceManifest()
+	m.Root.Providers.Compute = &manifest.Provider{Vendor: "nobody"}
+
+	_, err := New(f.reg).Plan(t.Context(), m, "env-a")
+	if err == nil {
+		t.Fatal("an unresolvable compute vendor produced a plan")
+	}
+	if !strings.Contains(err.Error(), "services.api") {
+		t.Fatalf("error should name the service it failed on: %v", err)
+	}
+}

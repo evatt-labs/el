@@ -87,8 +87,38 @@ type Registration struct {
 	Phase Phase
 	// Lookup is how instances are found (D26).
 	Lookup LookupStrategy
+	// When, if set, reports whether this registration applies to a given
+	// manifest. Nil means it always does, which is the common case.
+	//
+	// A companion resource can depend on a capability other than its own.
+	// Cloudflare Hyperdrive is asked for by choosing Neon for a database,
+	// but it is a Workers connection pooler — it belongs only when the
+	// compute side is Workers too. Planning one for a Neon database served
+	// by an AWS Lambda is not merely redundant: it demands a Cloudflare
+	// account that deployment has no reason to hold, to create something
+	// nothing will ever connect through.
+	When Condition
 	// Resource implements the verbs.
 	Resource Resource
+}
+
+// Condition reports whether a registration applies, given which vendor
+// fulfils each configured capability.
+//
+// Keyed by capability rather than taking the whole manifest so the registry
+// stays independent of the manifest package, and so a condition is a pure
+// function of a small map that a test can write by hand.
+type Condition func(vendors map[string]string) bool
+
+// RequiresCapabilityVendor builds a Condition satisfied only when capability
+// is fulfilled by vendor.
+func RequiresCapabilityVendor(capability, vendor string) Condition {
+	return func(vendors map[string]string) bool { return vendors[capability] == vendor }
+}
+
+// applies reports whether this registration is wanted for vendors.
+func (r Registration) applies(vendors map[string]string) bool {
+	return r.When == nil || r.When(vendors)
 }
 
 // Key is the registry key, "provider/type".
@@ -218,9 +248,18 @@ func (r *Registry) Lookup(key string) (Registration, bool) {
 // a Neon branch and the Cloudflare Hyperdrive configuration fronting it. Both
 // are returned, because both are what that one choice asked for.
 //
+// vendors maps each configured capability to the vendor fulfilling it, so a
+// registration can declare a condition on a capability other than its own —
+// see Registration.When.
+//
 // Returned in phase order so the caller does not have to sort them, and
 // within a phase in registration order so expansion is deterministic.
-func (r *Registry) Resolve(capability, vendor string) ([]Registration, error) {
+func (r *Registry) Resolve(capability string, vendors map[string]string) ([]Registration, error) {
+	vendor := vendors[capability]
+	if vendor == "" {
+		return nil, kerrors.Validation("no vendor is configured for capability %q", capability)
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -237,7 +276,21 @@ func (r *Registry) Resolve(capability, vendor string) ([]Registration, error) {
 			vendor, capability, join(providerNames(byVendor)))
 	}
 
-	out := append([]Registration(nil), regs...)
+	out := make([]Registration, 0, len(regs))
+	for _, reg := range regs {
+		// A registration whose condition is unmet is not an error: the
+		// capability is still fulfilled, by fewer resources. Dropping it
+		// silently is correct precisely because the condition describes when
+		// the resource is meaningful at all.
+		if reg.applies(vendors) {
+			out = append(out, reg)
+		}
+	}
+	if len(out) == 0 {
+		return nil, kerrors.Validation(
+			"vendor %q provides capability %q, but none of its resource types apply to this "+
+				"manifest's other provider choices", vendor, capability)
+	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Phase < out[j].Phase })
 	return out, nil
 }

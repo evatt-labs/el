@@ -62,7 +62,7 @@ func TestRegisterExpandsCapabilitiesInPhaseOrder(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	objects, err := reg.Resolve(manifest.CapabilityObjects, Provider)
+	objects, err := reg.Resolve(manifest.CapabilityObjects, map[string]string{manifest.CapabilityObjects: Provider})
 	if err != nil {
 		t.Fatalf("Resolve objects: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRegisterExpandsCapabilitiesInPhaseOrder(t *testing.T) {
 		t.Fatalf("objects = %+v, want [S3Bucket, CloudFrontDistribution] in that order", objects)
 	}
 
-	compute, err := reg.Resolve(manifest.CapabilityCompute, Provider)
+	compute, err := reg.Resolve(manifest.CapabilityCompute, map[string]string{manifest.CapabilityCompute: Provider})
 	if err != nil {
 		t.Fatalf("Resolve compute: %v", err)
 	}
