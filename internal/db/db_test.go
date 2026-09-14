@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +61,8 @@ func TestParseConnectionURI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseConnectionURI: %v", err)
 			}
-			if got != tc.want {
+			// ConnectionInfo carries a map, so == does not apply.
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got  %+v\nwant %+v", got, tc.want)
 			}
 		})
@@ -315,8 +317,69 @@ func TestDSNRoundTrips(t *testing.T) {
 		if err != nil {
 			t.Fatalf("re-parsing the DSN built from %s: %v", original, err)
 		}
-		if first != second {
+		if !reflect.DeepEqual(first, second) {
 			t.Errorf("round trip changed the connection:\n  first  %+v\n  second %+v", first, second)
 		}
+	}
+}
+
+// TestParseConnectionURIRejectsNonURIs: url.Parse accepts almost anything —
+// "garbage" parses without error into an empty scheme and host. Unchecked, a
+// truncated DATABASE_URL "succeeds" and fails much later as a connection
+// error against ":5432/", pointing at the wrong thing entirely.
+func TestParseConnectionURIRejectsNonURIs(t *testing.T) {
+	for _, bad := range []string{
+		"garbage",
+		"",
+		"postgres://",
+		"/just/a/path",
+		"postgres:///nohost",
+	} {
+		if _, err := ParseConnectionURI(bad); err == nil {
+			t.Errorf("ParseConnectionURI accepted %q", bad)
+		}
+	}
+}
+
+// TestExtraQueryParametersSurvive: Neon issues channel_binding=require, and
+// some configurations add options=endpoint%3D…. Re-emitting only sslmode
+// would connect with different parameters than the provider handed out.
+//
+//nolint:gosec // G101: a fabricated fixture URI, not a real credential
+func TestExtraQueryParametersSurvive(t *testing.T) {
+	const uri = "postgres://u:p@h.example.com/d?sslmode=require&channel_binding=require&options=endpoint%3Dep-cool-123"
+
+	conn, err := ParseConnectionURI(uri)
+	if err != nil {
+		t.Fatalf("ParseConnectionURI: %v", err)
+	}
+	if got := conn.Extra.Get("channel_binding"); got != "require" {
+		t.Fatalf("channel_binding = %q, want it carried through", got)
+	}
+	if got := conn.Extra.Get("options"); got != "endpoint=ep-cool-123" {
+		t.Fatalf("options = %q", got)
+	}
+
+	round, err := ParseConnectionURI(conn.DSN())
+	if err != nil {
+		t.Fatalf("re-parsing the rendered DSN: %v", err)
+	}
+	if !reflect.DeepEqual(conn, round) {
+		t.Fatalf("parameters were lost rendering the DSN:\n  before %+v\n  after  %+v", conn, round)
+	}
+}
+
+// TestWaitForConnectableSaysWhyItFailed: after thirty seconds, a wrong
+// password and a propagation delay look identical unless the last failure is
+// reported. The connector's error is already reduced to host:port/database.
+func TestWaitForConnectableSaysWhyItFailed(t *testing.T) {
+	client := New(WithConnector(&fakeConnector{failures: 99}), WithRetryDelay(time.Millisecond))
+
+	err := client.WaitForConnectable(t.Context(), ConnectionInfo{}, 2)
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("got %v, want the last probe's reason included", err)
 	}
 }

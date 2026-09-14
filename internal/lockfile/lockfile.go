@@ -163,8 +163,40 @@ func Write(dir string, lock *Lock) error {
 	}
 	encoded = append(encoded, '\n')
 
-	if err := os.WriteFile(file, encoded, 0o600); err != nil {
-		return kerrors.Wrap(err, kerrors.CodeUnexpected, "writing %s", file)
+	// Written to a temporary file and renamed, never truncated in place.
+	// Write is called after every provisioning step, so an interrupt lands
+	// mid-write far more often than it sounds — and a half-written lockfile
+	// is worse than none: Read deliberately refuses a corrupt one rather than
+	// falling back, so the environment it names could not be torn down at
+	// all. Rename within a directory is atomic, so a reader sees either the
+	// previous lock or the new one.
+	temp, err := os.CreateTemp(filepath.Join(dir, dirName), lock.Name+".lock.*.tmp")
+	if err != nil {
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "creating a temporary lockfile in %s", filepath.Join(dir, dirName))
+	}
+	tempName := temp.Name()
+	defer func() { _ = os.Remove(tempName) }() // no-op once the rename succeeds
+
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "setting permissions on %s", tempName)
+	}
+	if _, err := temp.Write(encoded); err != nil {
+		_ = temp.Close()
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "writing %s", tempName)
+	}
+	// Flushed before the rename: without it the rename can be durable while
+	// the contents are not, which is the corrupt-lockfile case arriving by a
+	// different route.
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "flushing %s", tempName)
+	}
+	if err := temp.Close(); err != nil {
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "closing %s", tempName)
+	}
+	if err := os.Rename(tempName, file); err != nil {
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "installing %s", file)
 	}
 	return nil
 }

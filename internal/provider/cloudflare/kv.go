@@ -25,12 +25,16 @@ func (s *KVService) Create(ctx context.Context, title string) (string, error) {
 	return ns.ID, nil
 }
 
+// kvPerPage is the endpoint's documented maximum. Its default is 20, which
+// is small enough that a single unpaged request misses namespaces on any real
+// account — and a missed namespace is one teardown silently leaves behind.
+const kvPerPage = 1000
+
 // FindByTitle returns the namespace with that title, or nil when absent.
+//
+// Walks every page: see listAll for why a single request is not enough here.
 func (s *KVService) FindByTitle(ctx context.Context, title string) (*KVNamespace, error) {
-	namespaces, err := do[[]KVNamespace](ctx, s.c, request{
-		method: "GET",
-		path:   s.c.accountPath("storage", "kv", "namespaces"),
-	})
+	namespaces, err := listAll[KVNamespace](ctx, s.c, s.c.accountPath("storage", "kv", "namespaces"), kvPerPage)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,9 @@
 package cloudflare
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // D1Service manages D1 databases.
 type D1Service struct{ c *Client }
@@ -26,13 +29,20 @@ func (s *D1Service) Create(ctx context.Context, name string) (string, error) {
 
 // FindByName returns the database called name, or nil when there is none.
 //
-// D1 has no lookup-by-name endpoint, so this lists and filters. A nil result
-// with a nil error is the "not there" answer teardown needs: deleting
-// something already gone is success, not failure.
+// The list endpoint accepts a name filter, so this asks the API to do the
+// matching rather than paging the whole account and filtering here. The exact
+// match is still checked below: the parameter filters, and nothing documents
+// it as an exact-match rather than a prefix or substring.
+//
+// A nil result with a nil error is the "not there" answer teardown needs:
+// deleting something already gone is success, not failure.
 func (s *D1Service) FindByName(ctx context.Context, name string) (*D1Database, error) {
+	query := url.Values{}
+	query.Set("name", name)
 	databases, err := do[[]D1Database](ctx, s.c, request{
 		method: "GET",
 		path:   s.c.accountPath("d1", "database"),
+		query:  query,
 	})
 	if err != nil {
 		return nil, err

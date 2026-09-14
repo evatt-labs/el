@@ -2,6 +2,7 @@ package lockfile
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,5 +318,54 @@ func TestPathRejectsTraversal(t *testing.T) {
 	}
 	if err := Write(dir, &Lock{LockfileVersion: Version, Name: "../escape"}); err == nil {
 		t.Error("Write accepted a traversing name")
+	}
+}
+
+// TestWriteIsAtomic: Write is called after every provisioning step, so an
+// interrupt lands mid-write more often than it sounds. Truncating in place
+// would leave a half-written file, and Read deliberately refuses a corrupt
+// lockfile rather than falling back — so the environment it names could not
+// be torn down at all. Rename within a directory is atomic, so a reader sees
+// either the old lock or the new one, never a partial.
+func TestWriteIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	first := Empty("env-a", "1.0.0", "acct", "sub")
+	if err := Write(dir, first); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second write large enough that a non-atomic implementation would be
+	// observably mid-flight.
+	second := Empty("env-a", "1.0.0", "acct", "sub")
+	for i := 0; i < 200; i++ {
+		second.Services[fmt.Sprintf("service-%03d", i)] = Service{
+			Dir: fmt.Sprintf("services/service-%03d", i), WorkerName: "w",
+			Resources: Resources{D1: []Resource{{Binding: "DB", Name: "n"}}},
+		}
+	}
+	if err := Write(dir, second); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Read(dir, "env-a")
+	if err != nil {
+		t.Fatalf("Read after rewrite: %v", err)
+	}
+	if len(got.Services) != 200 {
+		t.Fatalf("got %d services, want 200", len(got.Services))
+	}
+
+	// No temporary files left behind.
+	entries, err := os.ReadDir(filepath.Join(dir, ".kraai"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("a temporary file survived: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries in .kraai, want just the lockfile", len(entries))
 	}
 }
