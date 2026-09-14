@@ -186,3 +186,65 @@ func buildHostCallPlugin(capName string) []byte {
 	m.addExportMemory(exportMemory, 0)
 	return m.bytes()
 }
+
+// buildMemoryGrowPlugin returns a valid plugin whose capability export
+// attempts to grow linear memory by deltaPages and reports the result
+// rather than the input: the envelope payload is the low byte of
+// memory.grow's return, so 0xFF means the grow was refused (-1) and any
+// other value is the page count the memory had before a successful grow.
+//
+// Deliberately a *small* delta: the point of the fixture is to observe
+// where the runtime's ceiling sits, which a one-page request against a
+// two-page limit establishes exactly as well as a four-gigabyte one, and
+// without a test that allocates until something on the machine dies.
+func buildMemoryGrowPlugin(deltaPages int32) []byte {
+	m := &wasmModule{}
+	addStandardTriad(m, goodVersionBody(), goodAllocBody(), nil)
+
+	tI32I32ToI64 := m.addType([]byte{valI32, valI32}, []byte{valI64})
+	grow := m.addFunc(tI32I32ToI64, funcBody(concatBytes(
+		iI32Const(fixtureOutBase), iI32Const(0), iI32Store8(),
+		iI32Const(fixtureOutBase+1), iI32Const(deltaPages), iMemoryGrow(), iI32Store8(),
+		packConst(fixtureOutBase, 2),
+	)))
+	m.addExportFunc(fixtureEchoExport, grow)
+
+	m.setMemoryPages(fixtureMemPages)
+	m.addExportMemory(exportMemory, 0)
+	return m.bytes()
+}
+
+// buildOversizedMemoryPlugin returns a valid plugin that simply declares
+// a minimum memory of pages, to exercise the other half of the limit: a
+// declared minimum above the runtime's ceiling is refused at
+// instantiation, before a single page is committed.
+func buildOversizedMemoryPlugin(pages uint32) []byte {
+	m := &wasmModule{}
+	addStandardTriad(m, goodVersionBody(), goodAllocBody(), nil)
+
+	tI32I32ToI64 := m.addType([]byte{valI32, valI32}, []byte{valI64})
+	echo := m.addFunc(tI32I32ToI64, funcBody(echoCapabilityBody()))
+	m.addExportFunc(fixtureEchoExport, echo)
+
+	m.setMemoryPages(pages)
+	m.addExportMemory(exportMemory, 0)
+	return m.bytes()
+}
+
+// buildSpinningPlugin returns a valid plugin whose capability export
+// never returns. Every other export — including the triad Load calls
+// during ABI validation — behaves normally, so the plugin loads cleanly
+// and only Invoke hangs: precisely the shape a hostile or merely buggy
+// plugin has, and the one WithCloseOnContextDone exists to survive.
+func buildSpinningPlugin() []byte {
+	m := &wasmModule{}
+	addStandardTriad(m, goodVersionBody(), goodAllocBody(), nil)
+
+	tI32I32ToI64 := m.addType([]byte{valI32, valI32}, []byte{valI64})
+	spin := m.addFunc(tI32I32ToI64, funcBody(concatBytes(iSpinForever(), iI64Const(0))))
+	m.addExportFunc(fixtureEchoExport, spin)
+
+	m.setMemoryPages(fixtureMemPages)
+	m.addExportMemory(exportMemory, 0)
+	return m.bytes()
+}

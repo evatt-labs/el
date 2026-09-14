@@ -13,6 +13,24 @@ import (
 // DefaultPoolSize is used for a Spec that doesn't set PoolSize.
 const DefaultPoolSize = 4
 
+// DefaultMemoryLimitPages caps the linear memory of every plugin
+// instance at 1024 WASM pages (64MiB). Without it wazero applies the
+// wasm32 architectural ceiling of 65536 pages — 4GiB per instance, times
+// PoolSize — and a plugin needs no exploit to reach it, only a
+// memory.grow loop. D16 calls the plugin boundary sandboxed by default,
+// and a sandbox with no resource ceiling is not one: the host's own
+// address space is the resource the guest would otherwise be spending.
+//
+// This is a ceiling, not a reservation. wazero's WithMemoryCapacityFromMax
+// is left off, so an instance still allocates only the pages it actually
+// grows into; 64MiB is the point past which a plugin is presumed to be
+// misbehaving rather than working, chosen to leave ample headroom over a
+// Go wasip1 reactor's initial heap. A guest declaring a minimum above the
+// limit fails instantiation outright; one growing past it gets -1 back
+// from memory.grow, exactly as the WASM spec prescribes for a failed
+// grow.
+const DefaultMemoryLimitPages = 1024
+
 // Provision names one capability a plugin implements: Key is whatever a
 // caller registers it under in a Registry (this package places no
 // constraint on its shape — see Registry), and Export is the plugin's own
@@ -59,6 +77,14 @@ type Spec struct {
 type Host struct {
 	cache        wazero.CompilationCache
 	capabilities map[string]Capability
+	// memoryLimitPages is DefaultMemoryLimitPages for every Host built by
+	// NewHost. It is a field rather than the constant used inline solely
+	// so this package's own tests can prove the ceiling holds using a
+	// two-page limit instead of a 64MiB one — a resource-exhaustion test
+	// must be bounded by construction, not by whatever the host machine
+	// runs out of first. There is deliberately no exported knob: the
+	// limit is the host's trust boundary, not a plugin author's parameter.
+	memoryLimitPages uint32
 }
 
 // NewHost builds a Host backed by an on-disk compilation cache rooted at
@@ -77,7 +103,7 @@ func NewHost(cacheDir string, capabilities ...Capability) (*Host, error) {
 	for _, c := range capabilities {
 		known[c.Name()] = c
 	}
-	return &Host{cache: cache, capabilities: known}, nil
+	return &Host{cache: cache, capabilities: known, memoryLimitPages: DefaultMemoryLimitPages}, nil
 }
 
 // Close releases the shared compilation cache. It does not close any
@@ -126,7 +152,19 @@ func (h *Host) Load(ctx context.Context, fsys FS, spec Spec) (*Plugin, error) {
 		return nil, err
 	}
 
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(h.cache))
+	// WithCloseOnContextDone is what makes Invoke's ctx mean anything once
+	// control is inside the guest. Without it wazero only checks ctx
+	// between host calls, so a guest that never yields — `loop br 0` is the
+	// whole exploit — pins its goroutine, and the OS thread under it,
+	// forever; no deadline, cancellation, or shutdown reaches it. The cost
+	// is periodic checks inserted into compiled code, which the measured
+	// 56ns warm per-call overhead (docs/BLUEPRINT.md) can absorb many times
+	// over. See Plugin.Invoke for why this option obliges the pool to
+	// recycle instances: cancellation closes the module it interrupted.
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		WithCompilationCache(h.cache).
+		WithMemoryLimitPages(h.memoryLimitPages).
+		WithCloseOnContextDone(true))
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		_ = rt.Close(ctx)
 		return nil, kerrors.Wrap(err, kerrors.CodeUnexpected, "instantiating WASI for plugin %q", spec.Name)

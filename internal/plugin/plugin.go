@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -19,6 +20,11 @@ type Plugin struct {
 	compiled wazero.CompiledModule
 	provides []Provision
 	pool     *pool
+	// instanceSeq names instances uniquely within p.runtime. It keeps
+	// counting past the initial pool fill because the pool re-instantiates
+	// on demand (see pool.get), and wazero rejects a module name already
+	// registered in the same runtime.
+	instanceSeq atomic.Uint64
 }
 
 // Name returns the plugin's configured name (Spec.Name).
@@ -131,7 +137,7 @@ func valueTypesEqual(a, b []api.ValueType) bool {
 func (p *Plugin) fillPool(ctx context.Context, size int) error {
 	instances := make([]api.Module, 0, size)
 	for i := 0; i < size; i++ {
-		mod, err := p.instantiate(ctx, fmt.Sprintf("instance-%d", i))
+		mod, err := p.newInstance(ctx)
 		if err != nil {
 			for _, m := range instances {
 				_ = m.Close(ctx)
@@ -140,8 +146,14 @@ func (p *Plugin) fillPool(ctx context.Context, size int) error {
 		}
 		instances = append(instances, mod)
 	}
-	p.pool = newPool(instances)
+	p.pool = newPool(instances, p.newInstance)
 	return nil
+}
+
+// newInstance creates one uniquely-named pool member. It is both the
+// initial fill path and the pool's replacement factory.
+func (p *Plugin) newInstance(ctx context.Context) (api.Module, error) {
+	return p.instantiate(ctx, fmt.Sprintf("instance-%d", p.instanceSeq.Add(1)-1))
 }
 
 // instantiate creates one fresh instance of p.compiled, named uniquely
@@ -173,7 +185,16 @@ func (p *Plugin) instantiate(ctx context.Context, suffix string) (api.Module, er
 // Invoke blocks if every pooled instance is already in use, providing the
 // backpressure docs/BLUEPRINT.md D13 asks for: a plugin's concurrency is
 // bounded by its own pool size, never unbounded goroutine-per-call
-// fan-out. ctx cancellation is honored while waiting for a free instance.
+// fan-out.
+//
+// ctx bounds the whole call, not just the wait for a free instance: the
+// runtime is built with WithCloseOnContextDone (Host.Load), so a guest
+// that never returns is terminated when ctx is done and Invoke reports
+// wazero's sys.ExitError. Terminating a call closes the instance it ran
+// in; pool.get replaces a closed instance on the next borrow, so the
+// cost of a cancelled call is one re-instantiation and never a dead pool
+// slot. A caller that passes context.Background() here is choosing to let
+// a plugin hang forever — pass a deadline.
 func (p *Plugin) Invoke(ctx context.Context, key string, input []byte) ([]byte, error) {
 	export := ""
 	for _, prov := range p.provides {

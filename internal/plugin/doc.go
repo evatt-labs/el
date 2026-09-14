@@ -93,6 +93,38 @@
 // Spec.PoolSize and should be sized against docs/BLUEPRINT.md D13's
 // global concurrency limit, not chosen independently.
 //
+// # Resource bounds (D16)
+//
+// Every plugin runtime is built with two ceilings, because "sandboxed by
+// default" has to mean the host's own resources too, not only its
+// filesystem and network:
+//
+//   - Linear memory is capped at DefaultMemoryLimitPages. wazero's
+//     default is the wasm32 architectural maximum, 65536 pages / 4GiB per
+//     instance and PoolSize instances per plugin — a ceiling a plugin
+//     reaches with a memory.grow loop and no exploit at all. The cap is
+//     not a reservation: an instance still commits only the pages it
+//     grows into. A guest declaring a minimum above the cap fails
+//     instantiation; a guest growing past it gets -1 from memory.grow.
+//
+//   - Wall-clock execution is bounded by whatever ctx the caller hands
+//     Invoke, via wazero's WithCloseOnContextDone. Without it, ctx is
+//     only observed between host calls, so a guest that never yields
+//     (`loop br 0` is the entire exploit) pins its goroutine and the OS
+//     thread beneath it permanently — unreachable by deadline,
+//     cancellation, or shutdown. With it, such a call returns
+//     sys.ExitError once ctx is done.
+//
+// The second option has a consequence the pool must absorb: terminating a
+// call closes the module instance it was running in. A borrowed instance
+// is therefore checked at borrow time and replaced if it came back
+// closed, so a cancelled Invoke costs one re-instantiation rather than
+// permanently poisoning a pool slot. See pool.get.
+//
+// Neither ceiling is configurable per plugin. Both are the host's trust
+// boundary against code it did not write, and a boundary a plugin author
+// can widen from their own manifest entry is not one.
+//
 // # Middleware (blueprint open question 3)
 //
 // The archived JS-era blueprint treated "middleware" (wrapping

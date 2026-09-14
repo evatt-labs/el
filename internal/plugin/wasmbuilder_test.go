@@ -38,6 +38,15 @@ const (
 	opCall          = 0x10
 	opMiscPrefix    = 0xFC
 	opMemoryCopy    = 0x0A // immediate opcode number under the 0xFC prefix
+	opLoop          = 0x03
+	opBr            = 0x0C
+	opMemoryGrow    = 0x40
+
+	// blockTypeEmpty is the "no result" block type immediate. It shares
+	// its encoding with valI64 (0x40 vs 0x7E are distinct, but the empty
+	// block type is its own single-byte form, not a value type), so it is
+	// named separately to keep the distinction legible at call sites.
+	blockTypeEmpty = 0x40
 )
 
 // uleb128 encodes v as an unsigned LEB128 varint (WASM's encoding for
@@ -120,6 +129,22 @@ func iI64Or() []byte              { return []byte{opI64Or} }
 func iCall(funcIdx uint32) []byte { return append([]byte{opCall}, uleb128(uint64(funcIdx))...) }
 func iMemoryCopy() []byte         { return []byte{opMiscPrefix, opMemoryCopy, 0x00, 0x00} } // dst memidx=0, src memidx=0
 func iI32Add() []byte             { return []byte{opI32Add} }
+
+// iMemoryGrow emits memory.grow against memory 0: pops the page delta,
+// pushes the previous page count, or -1 if the grow was refused (which is
+// what a runtime memory limit produces — the WASM spec makes a failed
+// grow a return value, not a trap).
+func iMemoryGrow() []byte { return []byte{opMemoryGrow, 0x00} }
+
+// iSpinForever emits `loop; br 0; end` — a block that branches back to
+// its own start unconditionally and therefore never falls through. This
+// is the entire "hostile guest" CPU exploit: no syscall, no host import,
+// no allocation, just a guest that declines to return. Code after it is
+// unreachable, so WASM validation accepts whatever the enclosing
+// function's signature needs.
+func iSpinForever() []byte {
+	return concatBytes([]byte{opLoop, blockTypeEmpty}, []byte{opBr, 0x00}, []byte{opEnd})
+}
 
 // packConst emits the instruction sequence that pushes pack(ptr, length)
 // as an i64 constant computed from two i32 values already agreed at
