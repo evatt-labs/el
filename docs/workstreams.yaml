@@ -11,7 +11,7 @@ version: 1
 workstreams:
   - id: go-module-scaffold
     title: Go module, Cobra CLI skeleton, GoReleaser, CI
-    status: proposed
+    status: done
     depends: []
     decisions: [D1, D20]
     scope:
@@ -44,7 +44,7 @@ workstreams:
 
   - id: errors-package
     title: cockroachdb/errors-based error types, exit codes, centralized handler
-    status: proposed
+    status: done
     depends: [go-module-scaffold]
     decisions: [D18, D19]
     scope:
@@ -73,7 +73,7 @@ workstreams:
 
   - id: manifest-loader
     title: Directory-based manifest loader, Jinja2 templating, values precedence
-    status: proposed
+    status: done
     depends: [errors-package]
     decisions: [D3, D4, D5, D25]
     scope:
@@ -109,7 +109,7 @@ workstreams:
 
   - id: naming-policy
     title: Deterministic naming, frozen ephemeral grammar
-    status: proposed
+    status: done
     depends: [manifest-loader]
     decisions: [D7, D22]
     scope:
@@ -137,7 +137,7 @@ workstreams:
 
   - id: plugin-runtime
     title: wazero WASM plugin loader and registry, raw host-function ABI
-    status: proposed
+    status: done
     depends: [manifest-loader]
     decisions: [D3, D16, D28, D29]
     findings:
