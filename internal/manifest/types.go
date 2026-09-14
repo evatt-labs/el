@@ -23,17 +23,92 @@ type Root struct {
 	Plugins   []string  `yaml:"plugins,omitempty"`
 }
 
-// Providers names which vendor fulfils each capability kraai.yaml declares.
-// Fixed to the two capabilities BLUEPRINT.md's example documents (compute,
-// postgres) rather than a free-form map: BLUEPRINT.md's own open question 1
-// flags that this vocabulary was never re-confirmed for the Go rewrite, but
-// until it changes, a concrete struct is what "unknown keys rejected at
-// every level" and "no map[string]any as the resolved model" (D21) both
-// call for. Widening this is a one-line change when the vocabulary is
-// revisited.
+// Providers names which vendor fulfils each capability kraai.yaml declares,
+// and carries that vendor's own settings.
+//
+// A fixed struct rather than a free-form map, so an unknown capability is
+// rejected at load rather than silently ignored until something fails to
+// resolve. The vocabulary here is no longer a guess: it is exactly the set of
+// capabilities the resource registry has implementations for.
 type Providers struct {
-	Compute  string `yaml:"compute,omitempty"`
-	Postgres string `yaml:"postgres,omitempty"`
+	Compute  *Provider `yaml:"compute,omitempty"`
+	Postgres *Provider `yaml:"postgres,omitempty"`
+	KeyValue *Provider `yaml:"keyvalue,omitempty"`
+	Objects  *Provider `yaml:"objects,omitempty"`
+	Queues   *Provider `yaml:"queues,omitempty"`
+}
+
+// Capability names, matching the keys above and the capabilities resource
+// registrations declare. Exported so a caller resolving a manifest entry to a
+// provider uses the same strings the registry does, rather than a second copy
+// that can drift.
+const (
+	CapabilityCompute  = "compute"
+	CapabilityPostgres = "postgres"
+	CapabilityKeyValue = "keyvalue"
+	CapabilityObjects  = "objects"
+	CapabilityQueues   = "queues"
+)
+
+// Provider is one capability's vendor and that vendor's configuration.
+//
+// # Why Settings is free-form
+//
+// Which Neon project to branch from, which AWS region to deploy into, which
+// Lambda runtime to use — none of that belongs in this package's vocabulary,
+// and encoding it here would put every vendor's fields in the one type whose
+// purpose is not having them. Settings is passed to the provider, which
+// decodes and validates its own shape and reports its own errors.
+//
+// The same exemption Values carries (D5), for the same reason and with the
+// same cost: this is the one part of a manifest not checked at load.
+type Provider struct {
+	// Vendor is the implementation fulfilling the capability, e.g. "neon".
+	Vendor string `yaml:"vendor"`
+	// Settings is the vendor's own configuration, uninterpreted here.
+	Settings map[string]any `yaml:"settings,omitempty"`
+}
+
+// For returns the provider configured for a capability.
+//
+// A method rather than each caller switching on field names: the switch
+// belongs in one place, and a capability added to the struct without a case
+// here is a compile-time-visible omission instead of a silent nil.
+func (p Providers) For(capability string) (*Provider, bool) {
+	var configured *Provider
+	switch capability {
+	case CapabilityCompute:
+		configured = p.Compute
+	case CapabilityPostgres:
+		configured = p.Postgres
+	case CapabilityKeyValue:
+		configured = p.KeyValue
+	case CapabilityObjects:
+		configured = p.Objects
+	case CapabilityQueues:
+		configured = p.Queues
+	default:
+		return nil, false
+	}
+	if configured == nil {
+		return nil, false
+	}
+	return configured, true
+}
+
+// Capabilities returns the capabilities this manifest configures, in a stable
+// order.
+func (p Providers) Capabilities() []string {
+	var out []string
+	for _, capability := range []string{
+		CapabilityCompute, CapabilityPostgres,
+		CapabilityKeyValue, CapabilityObjects, CapabilityQueues,
+	} {
+		if _, ok := p.For(capability); ok {
+			out = append(out, capability)
+		}
+	}
+	return out
 }
 
 // ServicesFile is the shape of one services/*.yaml (or .yaml.j2) file
