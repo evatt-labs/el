@@ -25,10 +25,26 @@ jobs:
         with:
           persist-credentials: false
 
+      # The Go toolchain must be present before init: CodeQL's Go extractor
+      # autobuilds the module, and ubuntu-latest's preinstalled Go is not
+      # pinned to go.mod's version.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Both languages in one job, deliberately not a matrix. `analyze` is a
+      # required status check on main (branch protection); a matrix renames
+      # it to `analyze (go)` / `analyze (javascript-typescript)`, so the
+      # required context would never report again and every PR would block
+      # forever on a check that no longer exists. Splitting this later means
+      # updating branch protection in the same change.
+      #
+      # go covers cmd/ and internal/ - the actual product. javascript-typescript
+      # covers legacy-node/ (still the published npm package until the
+      # release-handover workstream lands) and npm/ (the Go binary's installer
+      # wrapper). Drop the JS half only when legacy-node/ is deleted.
       - uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
-          languages: javascript-typescript
+          languages: go,javascript-typescript
 
       - uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
-        with:
-          category: "/language:javascript-typescript"
