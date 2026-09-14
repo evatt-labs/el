@@ -29,10 +29,17 @@ const maxListPages = 100
 // than the one requested is the last one by definition, which holds whether
 // or not the endpoint reports totals, and does not depend on the count being
 // accurate.
-func listAll[T any](ctx context.Context, c *Client, path string, perPage int) ([]T, error) {
+// base, when non-nil, supplies filter parameters carried on every page — a
+// server-side filter narrows the walk rather than being applied afterwards.
+func listAll[T any](ctx context.Context, c *Client, path string, perPage int, base ...url.Values) ([]T, error) {
 	var all []T
 	for page := 1; page <= maxListPages; page++ {
 		query := url.Values{}
+		if len(base) > 0 {
+			for k, v := range base[0] {
+				query[k] = v
+			}
+		}
 		query.Set("page", strconv.Itoa(page))
 		query.Set("per_page", strconv.Itoa(perPage))
 

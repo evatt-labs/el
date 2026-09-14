@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"context"
 	"net/url"
+	"strconv"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
@@ -22,6 +23,40 @@ type R2Service struct{ c *Client }
 // likelier to be a bug than a real workload. Hitting the bound reports
 // rather than silently stopping.
 const maxDeletePages = 1000
+
+// r2PerPage is the list endpoint's documented maximum; its default is 20.
+const r2PerPage = 1000
+
+// R2Bucket is a bucket as the API reports it.
+type R2Bucket struct {
+	Name string `json:"name"`
+}
+
+// FindByName returns the bucket called name, or nil when absent.
+//
+// R2 has no get-by-name endpoint, so this lists with the name filter and
+// matches exactly here — name_contains is a substring filter, not an equality
+// test, so "env-a-api" would otherwise match "env-a-api-staging".
+//
+// Worth having even though Delete addresses buckets by name and needs no
+// lookup: without it a plan cannot tell an existing bucket from a missing one
+// and would propose creating one that is already there.
+func (s *R2Service) FindByName(ctx context.Context, name string) (*R2Bucket, error) {
+	query := url.Values{}
+	query.Set("per_page", strconv.Itoa(r2PerPage))
+	query.Set("name_contains", name)
+
+	buckets, err := listAll[R2Bucket](ctx, s.c, s.c.accountPath("r2", "buckets"), r2PerPage, query)
+	if err != nil {
+		return nil, err
+	}
+	for i := range buckets {
+		if buckets[i].Name == name {
+			return &buckets[i], nil
+		}
+	}
+	return nil, nil
+}
 
 // R2Object is one object in a bucket listing.
 type R2Object struct {

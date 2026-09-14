@@ -184,3 +184,39 @@ func TestOutputsAreConcurrencySafe(t *testing.T) {
 		}
 	}
 }
+
+// TestSpecSecretResolvesAndFails: a resource consuming a credential from an
+// earlier phase gets a producer, not a value — the same guarantee Outputs
+// makes, carried through to the resource rather than stopping at the applier.
+func TestSpecSecretResolvesAndFails(t *testing.T) {
+	spec := Spec{
+		Binding: "HYPERDRIVE",
+		Secrets: map[string]Secret{
+			"connection_uri": func(context.Context) (string, error) { return "postgresql://x", nil },
+			"broken":         func(context.Context) (string, error) { return "", errors.New("producer failed") },
+		},
+	}
+
+	got, err := spec.Secret(t.Context(), "connection_uri")
+	if err != nil {
+		t.Fatalf("Secret: %v", err)
+	}
+	if got != "postgresql://x" {
+		t.Fatalf("got %q", got)
+	}
+
+	if _, err := spec.Secret(t.Context(), "broken"); err == nil {
+		t.Fatal("a failing producer was reported as success")
+	}
+
+	_, err = spec.Secret(t.Context(), "absent")
+	if err == nil {
+		t.Fatal("an unsupplied credential resolved")
+	}
+	// Names what was asked for and which binding needed it, never a value.
+	for _, want := range []string{"absent", "HYPERDRIVE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q: %v", want, err)
+		}
+	}
+}

@@ -24,7 +24,11 @@
 // assuming one rule holds everywhere.
 package resource
 
-import "context"
+import (
+	"context"
+
+	"github.com/evatt-labs/kraai/internal/kerrors"
+)
 
 // Ref identifies one resource instance without asserting that it exists.
 //
@@ -66,8 +70,31 @@ type Import struct {
 type Spec struct {
 	// Binding is the name the service refers to this resource by.
 	Binding string
+	// Name is the derived resource name this spec will be created under.
+	Name string
 	// Config is the type-specific desired state.
 	Config map[string]any
+	// Secrets are credentials an earlier phase produced that this resource
+	// needs, as producers rather than values (D32).
+	//
+	// A Hyperdrive configuration needs its database's password; putting that
+	// in Config would place a live credential in a plain map that something
+	// downstream may log or serialise. Keeping it a function means the value
+	// exists only inside the call that uses it, which is the same guarantee
+	// Outputs makes — carried through to the resource that consumes it rather
+	// than stopping at the applier.
+	Secrets map[string]Secret
+}
+
+// Secret resolves a named credential the applier supplied, or fails naming
+// what was missing.
+func (s Spec) Secret(ctx context.Context, name string) (string, error) {
+	producer, ok := s.Secrets[name]
+	if !ok {
+		return "", kerrors.Validation(
+			"no %q credential was supplied for binding %q", name, s.Binding)
+	}
+	return producer(ctx)
 }
 
 // State is what the provider actually holds for a resource.
