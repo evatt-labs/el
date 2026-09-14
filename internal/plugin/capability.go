@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
@@ -77,8 +78,17 @@ type HTTPCapability struct {
 }
 
 // NewHTTPCapability builds an HTTPCapability that issues requests through
-// client.
+// client. A nil client gets NewGuardedHTTPClient, so the default is a
+// client that cannot reach internal infrastructure.
+//
+// A caller supplying its own client owns that guarantee itself: see
+// NewGuardedHTTPClient on why an injected transport must compose
+// GuardedDialContext. This constructor cannot check it — an HTTPDoer is
+// an interface, and its dialing is entirely its own business.
 func NewHTTPCapability(client HTTPDoer) *HTTPCapability {
+	if client == nil {
+		client = NewGuardedHTTPClient()
+	}
 	return &HTTPCapability{client: client}
 }
 
@@ -97,6 +107,18 @@ func (c *HTTPCapability) Invoke(ctx context.Context, input []byte) ([]byte, erro
 	}
 	if req.Method == "" || req.URL == "" {
 		return nil, kerrors.Validation("%s request requires method and url", CapabilityHTTPFetch)
+	}
+	// Scheme is checked here rather than left to the transport because
+	// the transport is injectable: the dial-time egress guard covers
+	// where a request may go, and this covers what a plugin may ask the
+	// host to do at all. file:// and friends never reach a dialer, so
+	// nothing downstream would catch them.
+	parsed, err := url.Parse(req.URL)
+	if err != nil {
+		return nil, kerrors.Wrap(err, kerrors.CodeValidation, "parsing %s url", CapabilityHTTPFetch)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, kerrors.Validation("%s refuses scheme %q: only http and https are permitted", CapabilityHTTPFetch, parsed.Scheme)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
