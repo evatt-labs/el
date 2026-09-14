@@ -93,21 +93,28 @@ func TestRegistrationsCoverTheCapability(t *testing.T) {
 		t.Fatalf("hyperdrive registration = %+v", hyper)
 	}
 
-	// One capability expanding to two types, in phase order — the branch must
-	// exist before anything fronts it (D30, D31).
+	// One capability expanding to two types, in phase order (D30, D31).
+	//
+	// This assertion previously required exactly one type per provider and
+	// called that correct, which locked in the opposite of what D30 says: a
+	// manifest choosing Neon for Postgres resolved to the branch alone and
+	// never planned the configuration fronting it, leaving a database no
+	// Worker could reach. Both halves come from one choice.
 	resolved, err := reg.Resolve(Capability, "neon")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if len(resolved) != 1 || resolved[0].Type != TypeBranch {
-		t.Fatalf("neon resolves to %+v", resolved)
+	if len(resolved) != 2 {
+		t.Fatalf("choosing vendor=neon resolved to %d type(s), want the branch and the "+
+			"hyperdrive config fronting it", len(resolved))
 	}
-	fronted, err := reg.Resolve(Capability, "cloudflare")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	if resolved[0].Type != TypeBranch || resolved[1].Type != TypeHyperdrive {
+		t.Fatalf("resolved out of phase order: %s then %s", resolved[0].Type, resolved[1].Type)
 	}
-	if len(fronted) != 1 || fronted[0].Type != TypeHyperdrive {
-		t.Fatalf("cloudflare resolves to %+v", fronted)
+	// Hyperdrive is Cloudflare's API but Neon's choice: nothing selects it by
+	// naming Cloudflare as the Postgres vendor.
+	if _, err := reg.Resolve(Capability, "cloudflare"); err == nil {
+		t.Fatal("naming cloudflare as the postgres vendor resolved to something")
 	}
 }
 

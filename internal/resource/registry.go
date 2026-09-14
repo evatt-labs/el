@@ -63,9 +63,22 @@ func Phases() []Phase { return []Phase{PhaseDatabase, PhaseStorage, PhaseCompute
 
 // Registration is one resource type's entry in the registry.
 type Registration struct {
-	// Provider and Type form the registry key.
+	// Provider and Type form the registry key: whose API this calls.
 	Provider string
 	Type     string
+	// Vendor is the manifest `vendor:` value that selects this registration.
+	// Empty means Provider, which is the common case.
+	//
+	// The two differ when fulfilling a capability takes resources from more
+	// than one API. Choosing Neon for Postgres also requires a Cloudflare
+	// Hyperdrive configuration in front of it: that registration's Provider
+	// is "cloudflare", because that is whose API creates it, but its Vendor
+	// is "neon", because choosing Neon is what asks for it. Without the
+	// distinction a manifest saying `postgres: {vendor: neon}` resolves to
+	// the branch alone and the configuration fronting it is never planned —
+	// which is exactly what happened, and what a test in the adapter that
+	// introduced it wrongly asserted as correct.
+	Vendor string
 	// Capability is what this type fulfils in a manifest — "postgres",
 	// "keyvalue", "objects", "queues", "compute". It is how a manifest entry
 	// that names no vendor reaches a vendor's implementation (Q1).
@@ -81,6 +94,14 @@ type Registration struct {
 // Key is the registry key, "provider/type".
 func (r Registration) Key() string { return r.Provider + "/" + r.Type }
 
+// vendor is the manifest value that selects this registration.
+func (r Registration) vendor() string {
+	if r.Vendor != "" {
+		return r.Vendor
+	}
+	return r.Provider
+}
+
 // Registry maps provider/type to an implementation, and capability plus
 // vendor to the types that fulfil it.
 //
@@ -91,8 +112,9 @@ type Registry struct {
 	mu sync.RWMutex
 	// byKey is provider/type -> registration.
 	byKey map[string]Registration
-	// byCapability is capability -> provider -> registrations, in
-	// registration order.
+	// byCapability is capability -> vendor -> registrations, in registration
+	// order. Keyed by vendor rather than provider so one manifest choice
+	// reaches every resource that choice implies — see Registration.Vendor.
 	byCapability map[string]map[string][]Registration
 	// decorate wraps every Resource at registration time (D17).
 	decorate func(Registration) Resource
@@ -147,12 +169,12 @@ func (r *Registry) Register(reg Registration) error {
 	}
 	r.byKey[reg.Key()] = reg
 
-	byProvider, ok := r.byCapability[reg.Capability]
+	byVendor, ok := r.byCapability[reg.Capability]
 	if !ok {
-		byProvider = map[string][]Registration{}
-		r.byCapability[reg.Capability] = byProvider
+		byVendor = map[string][]Registration{}
+		r.byCapability[reg.Capability] = byVendor
 	}
-	byProvider[reg.Provider] = append(byProvider[reg.Provider], reg)
+	byVendor[reg.vendor()] = append(byVendor[reg.vendor()], reg)
 	return nil
 }
 
@@ -187,33 +209,32 @@ func (r *Registry) Lookup(key string) (Registration, bool) {
 	return reg, ok
 }
 
-// Resolve returns the registrations a vendor contributes for a capability
-// (Q1).
+// Resolve returns every registration a vendor choice implies for a capability
+// (D30).
 //
-// A manifest entry names a capability — engine: postgres — and kraai.yaml
-// names the vendor that fulfils it — providers: {postgres: neon}. One
-// manifest entry can therefore expand to more than one resource: a Postgres
-// binding on Cloudflare becomes a database branch and the Hyperdrive
-// configuration fronting it, which is exactly what the JavaScript did by hand
-// and in a fixed order.
+// A manifest entry names a capability and kraai.yaml names the vendor that
+// fulfils it. One such pair can expand to more than one resource, and those
+// resources need not come from the same API: choosing Neon for Postgres means
+// a Neon branch and the Cloudflare Hyperdrive configuration fronting it. Both
+// are returned, because both are what that one choice asked for.
 //
 // Returned in phase order so the caller does not have to sort them, and
 // within a phase in registration order so expansion is deterministic.
-func (r *Registry) Resolve(capability, provider string) ([]Registration, error) {
+func (r *Registry) Resolve(capability, vendor string) ([]Registration, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	byProvider, ok := r.byCapability[capability]
+	byVendor, ok := r.byCapability[capability]
 	if !ok {
 		return nil, kerrors.Validation(
 			"no resource type provides capability %q — known capabilities: %s",
 			capability, join(capabilityNames(r.byCapability)))
 	}
-	regs, ok := byProvider[provider]
+	regs, ok := byVendor[vendor]
 	if !ok || len(regs) == 0 {
 		return nil, kerrors.Validation(
-			"provider %q does not provide capability %q — providers for it: %s",
-			provider, capability, join(providerNames(byProvider)))
+			"vendor %q does not provide capability %q — vendors for it: %s",
+			vendor, capability, join(providerNames(byVendor)))
 	}
 
 	out := append([]Registration(nil), regs...)

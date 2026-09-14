@@ -37,6 +37,11 @@ func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, setting
 		{
 			Provider: HyperdriveProvider, Type: TypeHyperdrive,
 			Capability: Capability,
+			// Cloudflare's API creates it, but choosing Neon for Postgres is
+			// what asks for it — so a manifest saying vendor: neon must reach
+			// this too, or the branch is provisioned with nothing in front of
+			// it and no Worker can connect.
+			Vendor: Provider,
 			// After the branch, whose connection string it consumes.
 			Phase:    resource.PhaseStorage,
 			Lookup:   resource.LookupByAttr,

@@ -251,3 +251,78 @@ func TestResolveErrorsListSeveralOptions(t *testing.T) {
 		t.Fatalf("got %v, want both providers listed", err)
 	}
 }
+
+// TestVendorSelectsAcrossProviders is D30's real shape: fulfilling one
+// capability can take resources from more than one API, and the manifest names
+// only the vendor. Keying resolution by provider instead made the second half
+// unreachable — a database provisioned with nothing in front of it.
+func TestVendorSelectsAcrossProviders(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(Registration{
+		Provider: "neon", Type: "branch", Capability: "postgres",
+		Phase: PhaseDatabase, Lookup: LookupByAttr, Resource: newStub(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Registration{
+		// Cloudflare's API, Neon's choice.
+		Provider: "cloudflare", Type: "hyperdrive", Vendor: "neon",
+		Capability: "postgres", Phase: PhaseStorage,
+		Lookup: LookupByAttr, Resource: newStub(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.Resolve("postgres", "neon")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("vendor=neon resolved to %d type(s), want both halves of the choice", len(got))
+	}
+	if got[0].Type != "branch" || got[1].Type != "hyperdrive" {
+		t.Fatalf("resolved out of phase order: %v", got)
+	}
+
+	// The companion is not independently selectable by its own provider name.
+	if _, err := r.Resolve("postgres", "cloudflare"); err == nil {
+		t.Fatal("the companion resolved under its provider rather than its vendor")
+	}
+}
+
+// Vendor defaults to Provider, which is the common case and must not need
+// stating.
+func TestVendorDefaultsToProvider(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(reg(t, "cloudflare", "kv_namespace", "keyvalue", PhaseStorage)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Resolve("keyvalue", "cloudflare")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Resolve = %v, %v", got, err)
+	}
+}
+
+// Two vendors competing for one capability stay separate — choosing one must
+// never pull in the other's resources.
+func TestCompetingVendorsStaySeparate(t *testing.T) {
+	r := NewRegistry()
+	for _, entry := range []Registration{
+		{Provider: "neon", Type: "branch", Capability: "postgres",
+			Phase: PhaseDatabase, Lookup: LookupByAttr, Resource: newStub(t)},
+		{Provider: "supabase", Type: "branch", Capability: "postgres",
+			Phase: PhaseDatabase, Lookup: LookupByAttr, Resource: newStub(t)},
+	} {
+		if err := r.Register(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := r.Resolve("postgres", "neon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Provider != "neon" {
+		t.Fatalf("choosing neon pulled in %v", got)
+	}
+}
