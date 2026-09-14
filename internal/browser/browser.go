@@ -7,6 +7,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,8 +23,12 @@ type Opener interface {
 	Open(ctx context.Context, target string) error
 }
 
-// ErrUnsafeScheme is returned for a URL that is not http or https.
-var ErrUnsafeScheme = kerrors.Validation("refusing to open a non-http(s) URL")
+// ErrUnsafeScheme is returned for a URL that is not http or https, so a
+// caller can branch on it with errors.Is.
+var ErrUnsafeScheme = errors.New("refusing to open a non-http(s) URL")
+
+// ErrUnparseableURL is returned for a target that is not a URL at all.
+var ErrUnparseableURL = errors.New("refusing to open a URL that does not parse")
 
 // CheckSafe rejects any scheme other than http and https, so a hostile
 // configuration cannot turn "open the environment" into file:, javascript:,
@@ -36,10 +41,10 @@ var ErrUnsafeScheme = kerrors.Validation("refusing to open a non-http(s) URL")
 func CheckSafe(target string) error {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return kerrors.Validation("refusing to open a URL that does not parse")
+		return kerrors.Wrap(ErrUnparseableURL, kerrors.CodeValidation, "target %q", target)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return kerrors.Validation("refusing to open non-http(s) URL with scheme %q", parsed.Scheme)
+		return kerrors.Wrap(ErrUnsafeScheme, kerrors.CodeValidation, "scheme %q", parsed.Scheme)
 	}
 	return nil
 }

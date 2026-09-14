@@ -156,3 +156,38 @@ func TestRequireTreatsEmptyAsMissing(t *testing.T) {
 		t.Fatal("an empty value was accepted as present")
 	}
 }
+
+// TestLoadDotEnvTrimsAroundTheSeparator: "API_TOKEN = abc" is a shape people
+// write. Untrimmed it defines a variable literally named "API_TOKEN " — legal
+// in setenv, invisible in a diff — which Require then reports missing while
+// the file plainly contains it.
+func TestLoadDotEnvTrimsAroundTheSeparator(t *testing.T) {
+	dir := writeDotEnv(t, "SPACED_KEY = spaced-value\nTABBED\t=\tvalue2\n")
+	t.Setenv("SPACED_KEY", "")
+	t.Setenv("TABBED", "")
+
+	if err := LoadDotEnv(dir); err != nil {
+		t.Fatalf("LoadDotEnv: %v", err)
+	}
+	if _, err := Require("SPACED_KEY", "TABBED"); err != nil {
+		t.Fatalf("Require rejected variables the file defines: %v", err)
+	}
+	if got := os.Getenv("SPACED_KEY"); got != "spaced-value" {
+		t.Fatalf("SPACED_KEY = %q, want no surrounding whitespace", got)
+	}
+}
+
+// TestLoadDotEnvSkipsKeylessLines: os.Setenv rejects an empty key, so a stray
+// "=oops" would fail the whole load and stop every command from starting.
+// Skipping is the documented contract for a line carrying no assignment.
+func TestLoadDotEnvSkipsKeylessLines(t *testing.T) {
+	dir := writeDotEnv(t, "=oops\n   =also-oops\nGOOD=value\n")
+	t.Setenv("GOOD", "")
+
+	if err := LoadDotEnv(dir); err != nil {
+		t.Fatalf("a stray line should be skipped, not fail the load: %v", err)
+	}
+	if got := os.Getenv("GOOD"); got != "value" {
+		t.Fatalf("GOOD = %q — parsing stopped at the stray line", got)
+	}
+}

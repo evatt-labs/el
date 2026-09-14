@@ -34,6 +34,14 @@ const (
 	DefaultAttempts             = 20
 	DefaultDelay                = 3 * time.Second
 	DefaultConsecutiveSuccesses = 3
+	// DefaultProbeTimeout bounds a single probe.
+	//
+	// Without one the documented window is not a window at all:
+	// http.DefaultClient sets no timeout, so a connection that opens and then
+	// hangs — entirely plausible against a hostname the edge is still
+	// learning — blocks until the caller's context is done, and a caller
+	// passing context.Background() waits forever with no output.
+	DefaultProbeTimeout = 10 * time.Second
 )
 
 // Options tunes Wait. A zero value means the corresponding Default.
@@ -41,8 +49,10 @@ type Options struct {
 	Attempts             int
 	Delay                time.Duration
 	ConsecutiveSuccesses int
-	// Client issues the probes; nil means http.DefaultClient.
+	// Client issues the probes; nil means a client bounded by ProbeTimeout.
 	Client *http.Client
+	// ProbeTimeout bounds one probe. Zero means DefaultProbeTimeout.
+	ProbeTimeout time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -55,8 +65,11 @@ func (o Options) withDefaults() Options {
 	if o.ConsecutiveSuccesses <= 0 {
 		o.ConsecutiveSuccesses = DefaultConsecutiveSuccesses
 	}
+	if o.ProbeTimeout <= 0 {
+		o.ProbeTimeout = DefaultProbeTimeout
+	}
 	if o.Client == nil {
-		o.Client = http.DefaultClient
+		o.Client = &http.Client{Timeout: o.ProbeTimeout}
 	}
 	return o
 }
@@ -90,7 +103,7 @@ func Wait(ctx context.Context, url string, opts Options) bool {
 
 	streak := 0
 	for i := 0; i < opts.Attempts; i++ {
-		if probe(ctx, opts.Client, url) {
+		if probe(ctx, opts.Client, url, opts.ProbeTimeout) {
 			streak++
 		} else {
 			streak = 0
@@ -114,7 +127,13 @@ func Wait(ctx context.Context, url string, opts Options) bool {
 // edge-error page. A network-level failure — DNS not resolving yet,
 // connection refused — lands in the same "not ready" bucket rather than
 // being distinguished, because the caller's response to either is identical.
-func probe(ctx context.Context, client *http.Client, url string) bool {
+func probe(ctx context.Context, client *http.Client, url string, timeout time.Duration) bool {
+	// Bounded per probe as well as on the client: an injected client may have
+	// no timeout of its own, and the deadline is what keeps the caller's
+	// overall window the length it claims to be.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false

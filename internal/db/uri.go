@@ -37,6 +37,9 @@ const (
 
 // ConnectionInfo is a Postgres connection URI parsed into its parts.
 //
+// Not comparable with ==, because Extra is a map. Compare field by field, or
+// with reflect.DeepEqual.
+//
 // Parsing happens once, here, so nothing else re-derives them and — more to
 // the point — so nothing else has to pass the URI around as one opaque string
 // that ends up somewhere it should not: an argument list, an error message, a
@@ -49,6 +52,9 @@ type ConnectionInfo struct {
 	Password string
 	Database string
 	SSLMode  string
+	// Extra carries every query parameter other than sslmode, so a
+	// provider-issued URI survives a parse and re-render unchanged.
+	Extra url.Values
 }
 
 // ParseConnectionURI splits a Postgres connection URI into its parts.
@@ -84,9 +90,36 @@ func ParseConnectionURI(uri string) (ConnectionInfo, error) {
 		}
 	}
 
+	// url.Parse accepts almost anything: "garbage" parses without error into
+	// an empty scheme and host. Left unchecked, a truncated or malformed
+	// DATABASE_URL "succeeds" here and surfaces much later as a connection
+	// failure against ":5432/", which points at the wrong thing entirely.
+	if parsed.Scheme == "" || parsed.Hostname() == "" {
+		return ConnectionInfo{}, kerrors.Validation(
+			"connection URI is missing a scheme or host — it does not look like a connection string")
+	}
+
+	query := parsed.Query()
 	sslMode := defaultSSLMode
-	if v := parsed.Query().Get("sslmode"); v != "" {
+	if v := query.Get("sslmode"); v != "" {
 		sslMode = v
+	}
+	// Every other parameter is carried through rather than dropped. Neon
+	// hands back channel_binding=require, and some configurations add
+	// options=endpoint%3D…; re-emitting only sslmode would silently connect
+	// with different parameters than the provider issued.
+	// Left nil when there is nothing to carry: a nil map ranges and reads
+	// like an empty one, and it keeps "no extra parameters" a single value
+	// rather than two that compare unequal.
+	var extra url.Values
+	for key, values := range query {
+		if key == "sslmode" {
+			continue
+		}
+		if extra == nil {
+			extra = url.Values{}
+		}
+		extra[key] = values
 	}
 
 	var user, password string
@@ -105,6 +138,7 @@ func ParseConnectionURI(uri string) (ConnectionInfo, error) {
 		Password: password,
 		Database: trimLeadingSlash(parsed.Path),
 		SSLMode:  sslMode,
+		Extra:    extra,
 	}, nil
 }
 
@@ -128,6 +162,9 @@ func (c ConnectionInfo) DSN() string {
 		Path:   "/" + c.Database,
 	}
 	q := url.Values{}
+	for key, values := range c.Extra {
+		q[key] = values
+	}
 	q.Set("sslmode", c.SSLMode)
 	u.RawQuery = q.Encode()
 	return u.String()

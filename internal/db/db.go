@@ -109,10 +109,13 @@ func (c *Client) WaitForConnectable(ctx context.Context, info ConnectionInfo, at
 	if attempts <= 0 {
 		attempts = DefaultConnectAttempts
 	}
+	var last error
 	for i := 0; i < attempts; i++ {
-		if err := c.probe(ctx, info); err == nil {
+		err := c.probe(ctx, info)
+		if err == nil {
 			return nil
 		}
+		last = err
 		if ctx.Err() != nil {
 			return kerrors.Wrap(ctx.Err(), kerrors.CodeUnexpected, "waiting for the database to accept connections")
 		}
@@ -125,7 +128,12 @@ func (c *Client) WaitForConnectable(ctx context.Context, info ConnectionInfo, at
 		case <-time.After(c.retryDelay):
 		}
 	}
-	return kerrors.Validation("database did not become connectable within %d attempts", attempts)
+	// The last failure is included: a wrong password and a propagation delay
+	// look identical after thirty seconds of waiting, and the connector's
+	// error is already reduced to host:port/database with no credential in
+	// it, so there is nothing to withhold.
+	return kerrors.Wrap(last, kerrors.CodeValidation,
+		"database did not become connectable within %d attempts", attempts)
 }
 
 // probe opens a connection, pings, and closes it.

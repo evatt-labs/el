@@ -25,6 +25,11 @@ func (s *QueuesService) Create(ctx context.Context, name string) (string, error)
 }
 
 // FindByName returns the queue called name, or nil when absent.
+//
+// Unpaged deliberately. Unlike the KV and Hyperdrive list endpoints, this one
+// declares no page or per_page parameter at all in Cloudflare's OpenAPI spec,
+// so it returns the account's queues in one response and adding paging
+// parameters would be guessing at an API that does not offer them.
 func (s *QueuesService) FindByName(ctx context.Context, name string) (*Queue, error) {
 	queues, err := do[[]Queue](ctx, s.c, request{
 		method: "GET",

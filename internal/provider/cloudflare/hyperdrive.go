@@ -61,12 +61,14 @@ func (s *HyperdriveService) Create(ctx context.Context, name string, o Origin, s
 	return config.ID, nil
 }
 
+// hyperdrivePerPage is the endpoint's documented maximum; its default is 20.
+const hyperdrivePerPage = 100
+
 // FindByName returns the configuration called name, or nil when absent.
+//
+// Walks every page: see listAll.
 func (s *HyperdriveService) FindByName(ctx context.Context, name string) (*HyperdriveConfig, error) {
-	configs, err := do[[]HyperdriveConfig](ctx, s.c, request{
-		method: "GET",
-		path:   s.c.accountPath("hyperdrive", "configs"),
-	})
+	configs, err := listAll[HyperdriveConfig](ctx, s.c, s.c.accountPath("hyperdrive", "configs"), hyperdrivePerPage)
 	if err != nil {
 		return nil, err
 	}

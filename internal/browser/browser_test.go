@@ -90,3 +90,21 @@ func TestShellMetacharactersSurviveAsData(t *testing.T) {
 		t.Fatalf("the metacharacter did not survive intact: %q", rec.target)
 	}
 }
+
+// TestCheckSafeReturnsTheSentinels: the package documents ErrUnsafeScheme as
+// what a caller branches on. Constructing a fresh error on each branch made
+// errors.Is always false, so any caller relying on it took the wrong path
+// silently.
+func TestCheckSafeReturnsTheSentinels(t *testing.T) {
+	err := CheckSafe("file:///etc/passwd")
+	if !errors.Is(err, ErrUnsafeScheme) {
+		t.Fatalf("got %v, which does not match ErrUnsafeScheme", err)
+	}
+	if !strings.Contains(err.Error(), "file") {
+		t.Fatalf("the error should still name the offending scheme: %v", err)
+	}
+
+	if err := CheckSafe("https://ok.example.com"); err != nil {
+		t.Fatalf("a valid URL was rejected: %v", err)
+	}
+}

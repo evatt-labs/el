@@ -83,6 +83,19 @@ func parseLine(line string) (key, value string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
+	// Trim around the separator. "API_TOKEN = abc" is a shape people write,
+	// and without this it defines a variable literally named "API_TOKEN "
+	// — legal in setenv, invisible in a diff, and reported missing by Require
+	// while the file plainly contains it.
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	// A line like "=oops" yields no key. Skipping is the documented contract
+	// for a line that carries no assignment; passing it to Setenv instead
+	// fails the whole load, so one stray character in a .env would stop every
+	// command from starting.
+	if key == "" {
+		return "", "", false
+	}
 	// A double-quoted value has its quotes stripped and \" unescaped, so a
 	// value containing spaces or a leading # can be written naturally.
 	if len(value) >= 2 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
