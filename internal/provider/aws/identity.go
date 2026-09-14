@@ -33,12 +33,148 @@ func cloudfrontMatch(properties map[string]any, name string) bool {
 
 // identityTagKey is the kraai-owned tag byTag types are found by (D26).
 //
-// A byTag type's Create must set this tag in the create call itself, never
-// as a follow-up write — a crash between the two would orphan the resource
-// unfindably. Create is not implemented in this read-only slice, so nothing
-// here writes the tag yet; it is named now because the write-path workstream
-// must not invent a second name for the same concept.
+// A byTag type's Create sets this tag in the create call itself (see
+// resourceType.Create's stampTag call), never as a follow-up write — a
+// crash between the two would orphan the resource unfindably.
 const identityTagKey = "kraai:resource-name"
+
+// stampFunc writes the byTag identity tag into a type's desired-state map
+// before CreateResource is called. The counterpart to matchFunc: matchFunc
+// reads the tag back out of GetResource's properties, stampFunc puts it
+// there in the first place. Two functions rather than one because the two
+// sides run against different shapes — desired state is being built up,
+// properties are being read down — and because not every AWS resource type
+// spells "Tags" the same way (see apigatewayv2StampTag versus
+// arrayTagsStampTag below).
+type stampFunc func(desired map[string]any, name string)
+
+// arrayTagsMatch and arrayTagsStampTag implement the "Object of {Key,
+// Value}" Tags shape CloudFormation uses for most resource types (S3,
+// CloudFront, ACM), as opposed to ApiGatewayV2::Api's flat "Object of
+// String" shape below.
+
+// arrayTagsMatch reports whether properties carries identityTagKey=name in
+// an array-of-{Key,Value} shaped Tags property.
+func arrayTagsMatch(properties map[string]any, name string) bool {
+	tags, ok := properties["Tags"].([]any)
+	if !ok {
+		return false
+	}
+	for _, t := range tags {
+		tagMap, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		if key, _ := tagMap["Key"].(string); key != identityTagKey {
+			continue
+		}
+		value, _ := tagMap["Value"].(string)
+		return value == name
+	}
+	return false
+}
+
+// arrayTagsStampTag sets identityTagKey=name in an array-of-{Key,Value}
+// shaped Tags property, replacing any prior entry for the same key rather
+// than appending a duplicate.
+func arrayTagsStampTag(desired map[string]any, name string) {
+	var tags []any
+	if existing, ok := desired["Tags"].([]any); ok {
+		for _, t := range existing {
+			if tagMap, ok := t.(map[string]any); ok {
+				if key, _ := tagMap["Key"].(string); key == identityTagKey {
+					continue
+				}
+			}
+			tags = append(tags, t)
+		}
+	}
+	tags = append(tags, map[string]any{"Key": identityTagKey, "Value": name})
+	desired["Tags"] = tags
+}
+
+// certificateMatch implements AWS::CertificateManager::Certificate's
+// LookupByTag strategy (D26): DomainName is explicitly not unique — the
+// same domain can have multiple certificates outstanding at once, e.g.
+// during rotation — so identity comes from the kraai-owned tag instead.
+// ACM::Certificate's Tags property uses CloudFormation's standard
+// array-of-{Key,Value} shape, the same as S3 and CloudFront.
+func certificateMatch(properties map[string]any, name string) bool {
+	return arrayTagsMatch(properties, name)
+}
+
+// certificateStampTag sets AWS::CertificateManager::Certificate's identity
+// tag in the CreateResource desired state itself (D26's non-negotiable
+// rule for byTag types): a crash between create and a follow-up tag write
+// would orphan the certificate unfindably, which is the one failure no
+// later run can clean up.
+func certificateStampTag(desired map[string]any, name string) {
+	arrayTagsStampTag(desired, name)
+}
+
+// hostedZoneMatch implements AWS::Route53::HostedZone's LookupByAPI
+// strategy.
+//
+// # Why this is a list-and-match walk, not a real API lookup
+//
+// D26 names this "byApi" after Route53's native ListHostedZonesByName call,
+// but this package's engine speaks only Cloud Control and CloudFormation
+// (doc.go: "one engine, not one client per service") — it holds no Route53
+// client, and adding one would mean a second, type-specific API surface
+// alongside the generic one this whole package exists to avoid. Cloud
+// Control's own ListResources offers no name filter for any type, so the
+// only mechanism this engine actually has is the same list-every-candidate-
+// and-match walk LookupByAttr and LookupByTag already use.
+//
+// Route53 does not enforce zone-name uniqueness the way CloudFront enforces
+// alias uniqueness — an account can hold two hosted zones for the same
+// name — so unlike a true byAttr match, this is not guaranteed to identify
+// a single zone. It returns the first match ListResources happens to
+// enumerate, which is a real ambiguity worth having a genuine Route53 API
+// client resolve properly rather than hiding; flagged here and in the PR
+// description rather than silently accepted, the same treatment
+// cloudfrontMatch already gives its own known gap.
+func hostedZoneMatch(properties map[string]any, name string) bool {
+	zoneName, _ := properties["Name"].(string)
+	return zoneName == name
+}
+
+// recordSetMatch implements AWS::Route53::RecordSet's LookupByAttr
+// strategy.
+//
+// Not byName: RecordSet's Cloud Control primary identifier is compound —
+// HostedZoneId, Name and Type strung together — and this package's byName
+// fast path (resourceType.resolve) assumes the derived name already is a
+// single opaque identifier string, which a compound identifier is not. That
+// fast path exists to skip a lookup call entirely for types like S3 and
+// Lambda where the derived name is the identifier verbatim; forcing
+// RecordSet through it would mean fabricating a compound-identifier string
+// kraai has no reliable format for, rather than the reasonably safe
+// list-and-match this package's engine already has a mechanism for. Not
+// mentioned in D26's own worked list (it enumerates S3, CloudFront, ACM and
+// HostedZone, not RecordSet) — this workstream extends the same reasoning
+// to a fifth type by the same test D26 itself applies: is the identifier
+// derivable and settable at create time without a lookup, or not.
+//
+// # Known gap: Name alone does not disambiguate record type or zone
+//
+// matchFunc's contract carries exactly one derived name to compare against
+// (see cloudfrontMatch and apigatewayv2Match, which have the identical
+// limitation against their own single attribute). Cloud Control's
+// ListResources for this type enumerates record sets across every hosted
+// zone in the account, so a Name collision is possible both across zones
+// (the same "www" exists in many zones) and within one zone across record
+// types (an A and an AAAA record for the same name are different
+// resources). This match cannot see either HostedZoneId or Type, so it
+// returns the first ListResources candidate whose Name matches — real
+// ambiguity, surfaced here rather than hidden, and worth a manifest-level
+// naming convention (folding the zone and type into the derived name) or a
+// richer matchFunc contract if kraai.dev's own manifest ever needs more
+// than one record type at the same name.
+func recordSetMatch(properties map[string]any, name string) bool {
+	recordName, _ := properties["Name"].(string)
+	return recordName == name
+}
 
 // apigatewayv2Match implements AWS::ApiGatewayV2::Api's LookupByTag strategy.
 //
@@ -67,4 +203,18 @@ func apigatewayv2Match(properties map[string]any, name string) bool {
 	}
 	value, ok := tags[identityTagKey].(string)
 	return ok && value == name
+}
+
+// apigatewayv2StampTag sets AWS::ApiGatewayV2::Api's identity tag in the
+// CreateResource desired state itself (D26's non-negotiable rule for byTag
+// types), in the flat "Object of String" shape this type's Tags property
+// uses — the counterpart to apigatewayv2Match above, which reads the same
+// shape back out.
+func apigatewayv2StampTag(desired map[string]any, name string) {
+	tags, ok := desired["Tags"].(map[string]any)
+	if !ok {
+		tags = map[string]any{}
+	}
+	tags[identityTagKey] = name
+	desired["Tags"] = tags
 }

@@ -23,6 +23,9 @@ func TestRegisterWiresEveryType(t *testing.T) {
 	}{
 		{Provider + "/" + TypeS3Bucket, manifest.CapabilityObjects, resource.PhaseStorage, resource.LookupByName},
 		{Provider + "/" + TypeCloudFrontDistribution, manifest.CapabilityObjects, resource.PhaseCompute, resource.LookupByAttr},
+		{Provider + "/" + TypeCertificateManagerCertificate, manifest.CapabilityObjects, resource.PhaseStorage, resource.LookupByTag},
+		{Provider + "/" + TypeRoute53HostedZone, manifest.CapabilityObjects, resource.PhaseStorage, resource.LookupByAPI},
+		{Provider + "/" + TypeRoute53RecordSet, manifest.CapabilityObjects, resource.PhaseCompute, resource.LookupByAttr},
 		{Provider + "/" + TypeLambdaFunction, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
 		{Provider + "/" + TypeAPIGatewayV2API, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByTag},
 	}
@@ -66,8 +69,25 @@ func TestRegisterExpandsCapabilitiesInPhaseOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve objects: %v", err)
 	}
-	if len(objects) != 2 || objects[0].Type != TypeS3Bucket || objects[1].Type != TypeCloudFrontDistribution {
-		t.Fatalf("objects = %+v, want [S3Bucket, CloudFrontDistribution] in that order", objects)
+	wantObjects := []string{TypeRoute53HostedZone, TypeCertificateManagerCertificate, TypeS3Bucket, TypeCloudFrontDistribution, TypeRoute53RecordSet}
+	if len(objects) != len(wantObjects) {
+		t.Fatalf("objects = %+v, want %d entries", objects, len(wantObjects))
+	}
+	// Resolve sorts by Phase ascending (stable within a phase), so this
+	// order also proves HostedZone, Certificate and S3Bucket all land in
+	// PhaseStorage, ahead of CloudFrontDistribution and RecordSet in
+	// PhaseCompute — CloudFront can reference the certificate PhaseStorage
+	// already provisioned by the time it runs.
+	for i, want := range wantObjects {
+		if objects[i].Type != want {
+			t.Fatalf("objects[%d].Type = %q, want %q (full: %+v)", i, objects[i].Type, want, objects)
+		}
+	}
+	if objects[0].Phase != resource.PhaseStorage || objects[2].Phase != resource.PhaseStorage {
+		t.Fatalf("objects = %+v, want the first three in PhaseStorage", objects)
+	}
+	if objects[3].Phase != resource.PhaseCompute || objects[4].Phase != resource.PhaseCompute {
+		t.Fatalf("objects = %+v, want the last two in PhaseCompute", objects)
 	}
 
 	compute, err := reg.Resolve(manifest.CapabilityCompute, map[string]string{manifest.CapabilityCompute: Provider})

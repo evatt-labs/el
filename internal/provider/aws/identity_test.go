@@ -121,3 +121,153 @@ func TestApigatewayv2Match(t *testing.T) {
 		})
 	}
 }
+
+func TestApigatewayv2StampTag(t *testing.T) {
+	t.Run("adds the tag to an empty desired state", func(t *testing.T) {
+		desired := map[string]any{}
+		apigatewayv2StampTag(desired, "my-api")
+
+		tags, ok := desired["Tags"].(map[string]any)
+		if !ok || tags[identityTagKey] != "my-api" {
+			t.Fatalf("Tags = %+v", desired["Tags"])
+		}
+	})
+
+	t.Run("adds the tag alongside existing tags", func(t *testing.T) {
+		desired := map[string]any{"Tags": map[string]any{"env": "prod"}}
+		apigatewayv2StampTag(desired, "my-api")
+
+		tags, _ := desired["Tags"].(map[string]any)
+		if tags["env"] != "prod" || tags[identityTagKey] != "my-api" {
+			t.Fatalf("Tags = %+v", tags)
+		}
+	})
+
+	t.Run("overwrites a stale prior value rather than leaving two", func(t *testing.T) {
+		desired := map[string]any{"Tags": map[string]any{identityTagKey: "stale-name"}}
+		apigatewayv2StampTag(desired, "my-api")
+
+		tags, _ := desired["Tags"].(map[string]any)
+		if tags[identityTagKey] != "my-api" {
+			t.Fatalf("Tags = %+v", tags)
+		}
+	})
+}
+
+func TestCertificateMatch(t *testing.T) {
+	cases := []struct {
+		name       string
+		properties map[string]any
+		want       string
+		match      bool
+	}{
+		{
+			name: "matches the identity tag in the array shape",
+			properties: map[string]any{"Tags": []any{
+				map[string]any{"Key": "env", "Value": "prod"},
+				map[string]any{"Key": identityTagKey, "Value": "my-cert"},
+			}},
+			want:  "my-cert",
+			match: true,
+		},
+		{
+			name:       "a different tag value does not match",
+			properties: map[string]any{"Tags": []any{map[string]any{"Key": identityTagKey, "Value": "other-cert"}}},
+			want:       "my-cert",
+			match:      false,
+		},
+		{
+			name:       "Tags missing entirely",
+			properties: map[string]any{},
+			want:       "my-cert",
+			match:      false,
+		},
+		{
+			name:       "Tags present but not an array (the ApiGatewayV2 flat-map shape) does not match",
+			properties: map[string]any{"Tags": map[string]any{identityTagKey: "my-cert"}},
+			want:       "my-cert",
+			match:      false,
+		},
+		{
+			name:       "a non-map element in Tags is skipped, not fatal",
+			properties: map[string]any{"Tags": []any{"not-a-map", map[string]any{"Key": identityTagKey, "Value": "my-cert"}}},
+			want:       "my-cert",
+			match:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := certificateMatch(tc.properties, tc.want); got != tc.match {
+				t.Fatalf("certificateMatch = %v, want %v", got, tc.match)
+			}
+		})
+	}
+}
+
+func TestCertificateStampTag(t *testing.T) {
+	t.Run("adds the tag to an empty desired state", func(t *testing.T) {
+		desired := map[string]any{}
+		certificateStampTag(desired, "my-cert")
+
+		if !certificateMatch(desired, "my-cert") {
+			t.Fatalf("Tags = %+v, want the stamped tag to round-trip through certificateMatch", desired["Tags"])
+		}
+	})
+
+	t.Run("preserves existing tags and replaces a stale identity tag rather than duplicating it", func(t *testing.T) {
+		desired := map[string]any{"Tags": []any{
+			map[string]any{"Key": "env", "Value": "prod"},
+			map[string]any{"Key": identityTagKey, "Value": "stale-name"},
+		}}
+		certificateStampTag(desired, "my-cert")
+
+		tags, _ := desired["Tags"].([]any)
+		if len(tags) != 2 {
+			t.Fatalf("Tags = %+v, want exactly 2 entries (env preserved, identity tag replaced not duplicated)", tags)
+		}
+		if !certificateMatch(desired, "my-cert") {
+			t.Fatalf("Tags = %+v", tags)
+		}
+	})
+}
+
+func TestHostedZoneMatch(t *testing.T) {
+	cases := []struct {
+		name       string
+		properties map[string]any
+		want       string
+		match      bool
+	}{
+		{name: "matches the zone Name", properties: map[string]any{"Name": "example.com."}, want: "example.com.", match: true},
+		{name: "a different name does not match", properties: map[string]any{"Name": "other.com."}, want: "example.com.", match: false},
+		{name: "Name missing entirely", properties: map[string]any{}, want: "example.com.", match: false},
+		{name: "Name present but not a string", properties: map[string]any{"Name": 42}, want: "example.com.", match: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostedZoneMatch(tc.properties, tc.want); got != tc.match {
+				t.Fatalf("hostedZoneMatch = %v, want %v", got, tc.match)
+			}
+		})
+	}
+}
+
+func TestRecordSetMatch(t *testing.T) {
+	cases := []struct {
+		name       string
+		properties map[string]any
+		want       string
+		match      bool
+	}{
+		{name: "matches the record Name", properties: map[string]any{"Name": "www.example.com."}, want: "www.example.com.", match: true},
+		{name: "a different name does not match", properties: map[string]any{"Name": "other.example.com."}, want: "www.example.com.", match: false},
+		{name: "Name missing entirely", properties: map[string]any{}, want: "www.example.com.", match: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := recordSetMatch(tc.properties, tc.want); got != tc.match {
+				t.Fatalf("recordSetMatch = %v, want %v", got, tc.match)
+			}
+		})
+	}
+}

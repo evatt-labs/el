@@ -11,11 +11,23 @@
 // CloudFormation TypeName and its identity lookup strategy (D26); adding a
 // resource type is a registry entry, never a new client.
 //
-// # This slice is read-only
+// # The write path
 //
-// Get works fully. Create, Update and Delete return ErrNotImplemented rather
-// than stub silently — the diff-to-JSON-Patch engine, async ProgressEvent
-// polling, and createOnlyProperties-driven replacement detection the write
-// path needs are explicitly out of scope here and belong to a later
-// workstream slice.
+// Create, Update and Delete are real. Create submits spec.Config as Cloud
+// Control's desired state (stamping the identity tag into it first for a
+// byTag type, per D26) and polls the resulting ProgressEvent to a terminal
+// state. Update fetches the current schema; a type with no update handler
+// (IMMUTABLE provisioning: create/read/delete only) refuses with
+// resource.ErrImmutable rather than attempting a call Cloud Control would
+// reject, and everything else diffs current properties against spec.Config
+// into an RFC 6902 JSON Patch document, submits it, and polls to terminal.
+// Delete treats an already-absent resource as success, both when resolve
+// finds no identifier and when Cloud Control's own delete reports the
+// resource gone — the same absence-is-success contract Get already holds.
+//
+// Async polling, JSON Patch emission and createOnlyProperties-driven
+// replacement detection are shared, generic mechanisms (client.go's
+// pollToTerminal, patch.go's buildPatch, resource.go's DiffersFromState) —
+// no per-type write logic exists, matching the read path's one-engine
+// design.
 package aws
