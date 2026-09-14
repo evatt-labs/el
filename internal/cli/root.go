@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"github.com/evatt-labs/kraai/internal/assemble"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,7 @@ func NewRootCommand() *cobra.Command {
 		"print full error stack traces (also settable via KRAAI_DEBUG=1)")
 
 	root.AddCommand(newVersionCommand())
-	root.AddCommand(newPlanCommand(assembleRegistry))
+	root.AddCommand(newPlanCommand(assemble.Registry))
 
 	return root
 }

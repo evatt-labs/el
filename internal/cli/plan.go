@@ -18,34 +18,15 @@ import (
 	"github.com/evatt-labs/kraai/internal/resource"
 )
 
-// RegistryAssembler builds a live resource registry for a resolved
-// manifest, wiring each configured capability's vendor to its
-// implementation with real provider clients.
+// RegistryAssembler builds a live resource registry for a resolved manifest,
+// wiring each configured capability's vendor to its implementation with real
+// provider clients.
 //
-// This is exactly internal/assemble.Registry's signature — a separate,
-// parallel workstream owns that package, and it does not exist on this
-// branch yet. Depending on the concrete function directly would make this
-// whole command fail to compile until that package lands; depending on
-// this interface-shaped function type instead means kraai plan compiles,
-// runs (against a stub, see assembleRegistry below), and is fully tested
-// today, with real wiring reduced to a one-line change once
-// internal/assemble exists:
-//
-//	root.AddCommand(newPlanCommand(assemble.Registry))
-//
-// in NewRootCommand, replacing the assembleRegistry stub used below.
+// A function type rather than a direct call to internal/assemble.Registry so
+// this command's tests need no cloud credentials and reach no network: a test
+// supplies a registry of fakes, and every path through the command is
+// exercised without any of it. The production wiring is in NewRootCommand.
 type RegistryAssembler func(ctx context.Context, m *manifest.Manifest) (*resource.Registry, error)
-
-// assembleRegistry is the production RegistryAssembler until
-// internal/assemble lands (see RegistryAssembler's doc comment). It
-// returns a clear, typed error rather than a nil registry that would
-// panic deep inside internal/plan, so `kraai plan` fails predictably for
-// a real user today instead of surfacing an obscure crash.
-var assembleRegistry RegistryAssembler = func(context.Context, *manifest.Manifest) (*resource.Registry, error) {
-	return nil, kerrors.New(
-		"internal/assemble is not wired into kraai plan yet (parallel workstream); " +
-			"every other part of this command is implemented and tested")
-}
 
 func newPlanCommand(assembler RegistryAssembler) *cobra.Command {
 	var (

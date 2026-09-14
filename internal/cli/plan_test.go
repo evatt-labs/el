@@ -175,13 +175,13 @@ func execPlan(t *testing.T, assembler RegistryAssembler, args []string) (string,
 
 func TestRunPlan_InvalidEnvironmentName(t *testing.T) {
 	dir := minimalFixture(t)
-	_, err := execPlan(t, assembleRegistry, []string{"Not An Env", "--dir", dir})
+	_, err := execPlan(t, unreachableAssembler, []string{"Not An Env", "--dir", dir})
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
 func TestRunPlan_MissingManifestIsError(t *testing.T) {
 	dir := t.TempDir() // empty: no kraai.yaml at all
-	_, err := execPlan(t, assembleRegistry, []string{testEnvName, "--dir", dir})
+	_, err := execPlan(t, unreachableAssembler, []string{testEnvName, "--dir", dir})
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
@@ -192,7 +192,7 @@ func TestRunPlan_BadDirIsError(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	_, err := execPlan(t, assembleRegistry, []string{testEnvName, "--dir", filePath})
+	_, err := execPlan(t, unreachableAssembler, []string{testEnvName, "--dir", filePath})
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
@@ -320,7 +320,7 @@ func TestRunPlan_JSONOutput_ReportsFailure(t *testing.T) {
 
 func TestRunPlan_BadSetArgPropagates(t *testing.T) {
 	dir := oneKeyValueBindingFixture(t)
-	_, err := execPlan(t, assembleRegistry, []string{testEnvName, "--dir", dir, "--set", "nopequals"})
+	_, err := execPlan(t, unreachableAssembler, []string{testEnvName, "--dir", dir, "--set", "nopequals"})
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
@@ -332,7 +332,7 @@ func TestRunPlan_SetFlagReachesLoader(t *testing.T) {
 	dir := templatedVendorFixture(t)
 
 	t.Run("without --set the rendered vendor is empty and validation fails", func(t *testing.T) {
-		_, err := execPlan(t, assembleRegistry, []string{testEnvName, "--dir", dir})
+		_, err := execPlan(t, unreachableAssembler, []string{testEnvName, "--dir", dir})
 		_ = requireCode(t, err, kerrors.CodeValidation)
 	})
 
@@ -349,7 +349,7 @@ func TestRunPlan_SetFlagReachesLoader(t *testing.T) {
 }
 
 func TestNewPlanCommand_Flags(t *testing.T) {
-	cmd := newPlanCommand(assembleRegistry)
+	cmd := newPlanCommand(unreachableAssembler)
 
 	dirFlag := cmd.Flags().Lookup("dir")
 	if dirFlag == nil || dirFlag.DefValue != "." {
@@ -365,10 +365,10 @@ func TestNewPlanCommand_Flags(t *testing.T) {
 }
 
 func TestNewPlanCommand_RequiresExactlyOneArg(t *testing.T) {
-	if _, err := execPlan(t, assembleRegistry, nil); err == nil {
+	if _, err := execPlan(t, unreachableAssembler, nil); err == nil {
 		t.Errorf("execPlan with no args = nil error, want an error")
 	}
-	if _, err := execPlan(t, assembleRegistry, []string{"a", "b"}); err == nil {
+	if _, err := execPlan(t, unreachableAssembler, []string{"a", "b"}); err == nil {
 		t.Errorf("execPlan with two args = nil error, want an error")
 	}
 }
@@ -385,7 +385,7 @@ func TestNewRootCommand_HasPlanCommand(t *testing.T) {
 }
 
 func TestAssembleRegistryStub_ReturnsClearError(t *testing.T) {
-	_, err := assembleRegistry(context.Background(), &manifest.Manifest{})
+	_, err := unreachableAssembler(context.Background(), &manifest.Manifest{})
 	_ = requireCode(t, err, kerrors.CodeUnexpected)
 }
 
@@ -530,3 +530,11 @@ func TestWritePlanText_NilPlan(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write boom") }
+
+// unreachableAssembler stands in where the command must fail before ever
+// assembling a registry — a malformed environment name, a missing manifest.
+// It fails loudly if reached, so a test that stops asserting what it thinks
+// it asserts says so rather than passing quietly.
+func unreachableAssembler(context.Context, *manifest.Manifest) (*resource.Registry, error) {
+	return nil, kerrors.New("the assembler was reached; this command should have failed first")
+}
