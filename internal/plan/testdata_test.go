@@ -39,12 +39,15 @@ func newRegistryFixture(t *testing.T) *registryFixture {
 			Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr, Resource: f.branch,
 		},
 		{
-			// Registered under a different literal Provider than the
-			// branch above, on purpose: this is the exact shape
+			// A different literal Provider than the branch above, on
+			// purpose: this is the exact shape
 			// internal/provider/neonresource.Register uses for Hyperdrive
-			// (D30), and registrationsFor exists to expand across it.
-			Provider: "cloudflare", Type: "hyperdrive", Capability: manifest.CapabilityPostgres,
-			Phase: resource.PhaseStorage, Lookup: resource.LookupByAttr, Resource: f.hyperdrive,
+			// (D30). Cloudflare's API creates it, but choosing Neon for
+			// Postgres is what asks for it, so Vendor says neon — without
+			// which one vendor choice reaches only half the capability.
+			Provider: "cloudflare", Type: "hyperdrive", Vendor: "neon",
+			Capability: manifest.CapabilityPostgres,
+			Phase:      resource.PhaseStorage, Lookup: resource.LookupByAttr, Resource: f.hyperdrive,
 		},
 		{
 			Provider: "cloudflare", Type: "kv_namespace", Capability: manifest.CapabilityKeyValue,

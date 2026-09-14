@@ -452,3 +452,62 @@ func assertValidationError(t *testing.T, err error, wantSubstr string) {
 func bindingName(i int) string {
 	return fmt.Sprintf("BINDING_%d", i)
 }
+
+// TestPlanReportsCancellationRatherThanFailures: every Get honours ctx, so a
+// cancelled walk leaves an Action per resource saying it could not be read.
+// Returning that as a plan renders a wall of failures that reads as "your
+// infrastructure is unreachable" rather than "you pressed Ctrl-C", and the
+// reader cannot tell which entries are real.
+func TestPlanReportsCancellationRatherThanFailures(t *testing.T) {
+	f := newRegistryFixture(t)
+	for _, r := range []*fakeResource{f.branch, f.hyperdrive, f.kv, f.r2, f.queue} {
+		r.delay = 50 * time.Millisecond
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got, err := New(f.reg).Plan(ctx, f.oneServiceManifest(), "env-a")
+	if err == nil {
+		kinds := map[ActionKind]int{}
+		for _, a := range got.Actions {
+			kinds[a.Kind]++
+		}
+		t.Fatalf("a cancelled plan returned %d actions (%v) and no error", len(got.Actions), kinds)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want the cancellation to surface", err)
+	}
+	if got != nil {
+		t.Fatalf("a cancelled plan returned a Plan alongside its error: %+v", got)
+	}
+}
+
+// TestPostgresExpandsAcrossProviders is what the registry fix makes possible:
+// one vendor choice reaching both halves of the capability, without the
+// planner supplementing the registry itself.
+func TestPostgresExpandsAcrossProviders(t *testing.T) {
+	f := newRegistryFixture(t)
+
+	got, err := New(f.reg).Plan(t.Context(), f.oneServiceManifest(), "env-a")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	var branch, hyperdrive int
+	for _, a := range got.Actions {
+		switch a.Type {
+		case "branch":
+			branch++
+		case "hyperdrive":
+			hyperdrive++
+		}
+	}
+	if branch != 1 || hyperdrive != 1 {
+		t.Fatalf("one postgres binding planned %d branch and %d hyperdrive actions, want one each",
+			branch, hyperdrive)
+	}
+	if f.branch.getCalls != 1 || f.hyperdrive.getCalls != 1 {
+		t.Fatalf("Get calls: branch=%d hyperdrive=%d", f.branch.getCalls, f.hyperdrive.getCalls)
+	}
+}

@@ -120,6 +120,16 @@ func (p *Planner) Plan(ctx context.Context, m *manifest.Manifest, environmentNam
 		}
 		actions = append(actions, p.getPhase(ctx, group)...)
 	}
+
+	// A cancelled run is not a plan. Every Get honours ctx, so cancelling
+	// mid-walk leaves an Action per resource saying it could not be read —
+	// which renders as a wall of failures and reads as "your infrastructure
+	// is unreachable" rather than "you pressed Ctrl-C". Report the
+	// cancellation instead; there is no partial plan worth showing, because
+	// the reader cannot tell which entries are real.
+	if err := ctx.Err(); err != nil {
+		return nil, kerrors.Wrap(err, kerrors.CodeUnexpected, "planning was cancelled")
+	}
 	return &Plan{Actions: actions}, nil
 }
 
@@ -186,7 +196,11 @@ func (p *Planner) expandBinding(
 		return nil, kerrors.Validation("no provider is configured for capability %q", capability)
 	}
 
-	regs, err := p.registrationsFor(capability, provider.Vendor)
+	// Resolve returns every type the vendor choice implies, across providers:
+	// a Postgres binding on Neon reaches both the branch and the Cloudflare
+	// Hyperdrive configuration fronting it, because the registry keys this by
+	// vendor rather than by which API creates each piece.
+	regs, err := p.registry.Resolve(capability, provider.Vendor)
 	if err != nil {
 		return nil, err
 	}
@@ -205,62 +219,6 @@ func (p *Planner) expandBinding(
 			res:  r.Resource,
 		})
 	}
-	return out, nil
-}
-
-// registrationsFor resolves capability+vendor to every resource type it
-// expands to (D30), including a companion registered under a different
-// literal provider string.
-//
-// registry.Resolve(capability, vendor) is scoped to one (capability,
-// provider) pair. That is exactly right for the ordinary case, but D30's
-// own worked example does not fit it: a Postgres binding on Neon expands
-// to a Neon branch *and* the Cloudflare Hyperdrive configuration fronting
-// it (internal/provider/neonresource), and Hyperdrive is registered under
-// Provider "cloudflare" because that is genuinely which API it calls, not
-// under "neon". Resolve(capability, "neon") alone returns only the branch
-// — internal/provider/neonresource's own test pins exactly this, resolving
-// "neon" and "cloudflare" separately and checking each returns one type.
-//
-// So this pulls in every other registration sharing the capability that
-// Resolve's primary call did not already return, deduplicated by registry
-// key, and re-sorts by phase. That is safe for every capability registered
-// in this codebase today: nothing here registers two independently
-// selectable vendors under the same capability string, so "the rest of
-// this capability" and "this vendor's companions" are the same set in
-// practice. It stops being safe the day that changes — a capability with
-// two competing vendors would have this pull in the vendor the manifest
-// did *not* choose. There is no metadata on a Registration today that
-// would let a generic caller tell "companion resource under another
-// provider" apart from "a different vendor's own implementation"; that
-// distinction currently exists only as a convention among the people
-// wiring up Register functions. The real fix belongs in
-// internal/resource — a registration declaring which other provider
-// strings it travels with for a capability — which is out of this
-// package's scope to add.
-func (p *Planner) registrationsFor(capability, vendor string) ([]resource.Registration, error) {
-	primary, err := p.registry.Resolve(capability, vendor)
-	if err != nil {
-		return nil, err
-	}
-
-	out := append([]resource.Registration(nil), primary...)
-	seen := make(map[string]struct{}, len(primary))
-	for _, r := range primary {
-		seen[r.Key()] = struct{}{}
-	}
-	for _, r := range p.registry.All() {
-		if r.Capability != capability {
-			continue
-		}
-		if _, ok := seen[r.Key()]; ok {
-			continue
-		}
-		out = append(out, r)
-		seen[r.Key()] = struct{}{}
-	}
-
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Phase < out[j].Phase })
 	return out, nil
 }
 
