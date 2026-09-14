@@ -29,10 +29,20 @@ import (
 // DefaultBaseURL is Cloudflare's API root.
 const DefaultBaseURL = "https://api.cloudflare.com/client/v4"
 
-// maxErrorBody bounds how much of a failure response is read before giving
-// up. An error body is small; anything larger is a proxy or an error page,
-// and reading it in full would let a remote response dictate memory use.
-const maxErrorBody = 64 << 10
+// Response size ceilings. Both exist so a remote response cannot dictate this
+// process's memory use, but they are deliberately far apart.
+//
+// A failure body is small — Cloudflare's error envelope is a few hundred
+// bytes — so anything larger is a proxy page or an edge error, and there is
+// nothing in it worth reading. A success body is a listing: an R2 page
+// carries up to a thousand object keys, and a busy account's KV namespace
+// list is larger still. Holding both to the error ceiling truncates real
+// listings, and truncation surfaces in teardown, where the consequence is an
+// orphaned resource nobody is tracking.
+const (
+	maxErrorBody    = 64 << 10
+	maxResponseBody = 32 << 20
+)
 
 // Client is a Cloudflare API client scoped to one account.
 //
@@ -183,21 +193,43 @@ func do[T any](ctx context.Context, c *Client, req request) (T, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	httpFailed := resp.StatusCode < 200 || resp.StatusCode >= 300
+
+	limit := int64(maxResponseBody)
+	if httpFailed {
+		limit = maxErrorBody
+	}
+	// Read one byte past the ceiling so hitting it is distinguishable from a
+	// body that merely happens to be exactly that long.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return zero, kerrors.Wrap(err, kerrors.CodeUnexpected, "reading response from %s", req.path)
 	}
+	if int64(len(raw)) > limit {
+		if httpFailed {
+			// The detail is unreadable but the status is the actionable part.
+			return zero, &APIError{Status: resp.StatusCode, Path: req.path}
+		}
+		return zero, kerrors.Validation(
+			"response from %s exceeded the %d-byte ceiling", req.path, limit)
+	}
 
 	var env envelope[T]
-	// A body that does not decode is still a failure worth reporting by
-	// status; Cloudflare returns HTML from its edge for some 5xx.
 	decodeErr := json.Unmarshal(raw, &env)
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !env.Success {
+	// Order matters. A non-2xx is Cloudflare refusing, and its body may not
+	// decode at all — the edge returns HTML for some 5xx — so report the
+	// status without requiring a decode. Only past that does a decode failure
+	// mean what it says; blaming the API for a body this end could not read
+	// sends the reader to the wrong dashboard.
+	if httpFailed {
 		return zero, &APIError{Status: resp.StatusCode, Path: req.path, Errors: env.Errors}
 	}
 	if decodeErr != nil {
 		return zero, kerrors.Wrap(decodeErr, kerrors.CodeUnexpected, "decoding response from %s", req.path)
+	}
+	if !env.Success {
+		return zero, &APIError{Status: resp.StatusCode, Path: req.path, Errors: env.Errors}
 	}
 	return env.Result, nil
 }
