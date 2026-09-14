@@ -189,6 +189,18 @@ workstreams:
         Answer open question 3 (does "middleware" survive as a distinct
         concept from "a plugin with hooks") as part of this design, not
         deferred past it.
+      - >-
+        D16 resource bounds: build the runtime with
+        `WithMemoryLimitPages` and `WithCloseOnContextDone(true)`.
+        wazero's defaults are the wasm32 ceiling (65536 pages / 4GiB per
+        instance, times the pool size) and no in-guest ctx observation at
+        all, so an unbounded `memory.grow` or a bare `loop br 0` in a
+        guest takes the host's memory or pins a goroutine and its OS
+        thread forever. Neither limit is plugin-author-configurable: they
+        are the host's trust boundary against code it did not write.
+        `WithCloseOnContextDone` closes the interrupted instance, so the
+        pool must replace a closed instance at borrow time rather than
+        poisoning the slot.
     acceptance:
       - >-
         A minimal example WASM plugin (built as part of the test fixtures,
@@ -206,6 +218,29 @@ workstreams:
         actually being hit on a second run rather than silently recompiling
         (D29's whole point, and the in-memory-cache trap makes a silent
         regression here easy).
+      - >-
+        A plugin cannot exhaust host memory or CPU: tests prove a guest
+        growing past the memory limit is refused, a guest declaring a
+        minimum above it fails instantiation, a never-returning guest is
+        terminated by Invoke's ctx, and the pool recovers the instance
+        that termination closed. Every one of these probes is bounded by
+        construction — a two-page limit and a 150ms deadline, never
+        "allocate or spin until the machine stops it."
+      - >-
+        A plugin cannot abort the host process by re-entering it: a guest
+        whose `kraai_alloc` calls a host capability closes a
+        hostCapabilityFunc -> placeEnvelope -> placeInGuestMemory ->
+        kraai_alloc cycle on the caller's goroutine. Measured against a
+        deliberately-lowered 8MiB stack this produced `fatal error: stack
+        overflow` (exit 2) — fatal, so unrecoverable by `recover()`, and
+        growing host stack no WASM memory limit governs. Bounded by
+        MaxHostCallDepth, with a control test proving shallow re-entry
+        still works.
+      - >-
+        A plugin binary larger than MaxPluginBytes is refused before it
+        reaches the compiler: reading and compiling the .wasm is the one
+        part of loading that happens entirely outside the sandbox, at a
+        cost linear in file size.
     smoke: false
 
   - id: resource-contract-and-telemetry
