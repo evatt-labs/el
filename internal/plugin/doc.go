@@ -93,6 +93,24 @@
 // Spec.PoolSize and should be sized against docs/BLUEPRINT.md D13's
 // global concurrency limit, not chosen independently.
 //
+// # Egress (D16)
+//
+// A granted host capability runs with the *host's* network identity — its
+// VPC placement, its instance role, its side of any private link — while
+// the plugin chooses the request. HTTPCapability therefore guards egress
+// at dial time, against the resolved IP, denying link-local (cloud
+// instance metadata), loopback, RFC1918, CGNAT and the IPv6 spellings of
+// the same.
+//
+// Dial time, not request time, because the URL a plugin supplies is the
+// least trustworthy part of the request: a redirect, a rebinding DNS
+// answer, or an IPv4-mapped IPv6 literal each defeat a check made on the
+// URL string, and all three dial. See egress.go.
+//
+// This is a deny of infrastructure, not an allowlist of destinations.
+// Which public hosts a given plugin may reach is manifest policy and is
+// deliberately unanswered here.
+//
 // # Resource bounds (D16)
 //
 // Every plugin runtime is built with two ceilings, because "sandboxed by

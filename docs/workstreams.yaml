@@ -186,6 +186,17 @@ workstreams:
         a WASM plugin may import (e.g. an HTTP-call capability), explicitly
         granted, never ambient. Nothing is reachable by default.
       - >-
+        Host-capability egress: a capability runs with the host's network
+        identity while the plugin picks the request, so HTTPCapability
+        guards at dial time against the resolved IP — link-local (cloud
+        instance metadata), loopback, RFC1918, CGNAT, and the IPv4-mapped
+        IPv6 / NAT64 / 6to4 spellings of each. Checking the URL string
+        instead would be defeated by a redirect, a rebinding DNS answer,
+        or an `http://[::ffff:169.254.169.254]/` literal, all of which
+        dial. A deny of infrastructure, not an allowlist of destinations:
+        which public hosts a plugin may reach is manifest policy, left
+        open deliberately.
+      - >-
         Answer open question 3 (does "middleware" survive as a distinct
         concept from "a plugin with hooks") as part of this design, not
         deferred past it.
@@ -241,6 +252,14 @@ workstreams:
         reaches the compiler: reading and compiling the .wasm is the one
         part of loading that happens entirely outside the sandbox, at a
         cost linear in file size.
+      - >-
+        A plugin granted the HTTP capability cannot reach cloud instance
+        metadata or any internal address: tests cover every blocked range
+        including the IPv4-mapped IPv6, NAT64 and 6to4 spellings, prove a
+        live loopback listener is refused where an unguarded dialer
+        reaches it, and prove the vetted IP (not the hostname) is what
+        gets dialed, so there is no rebinding window. Non-http(s) schemes
+        are refused before any dialer sees them.
     smoke: false
 
   - id: resource-contract-and-telemetry
