@@ -265,9 +265,9 @@ workstreams:
 
   - id: resource-contract-and-telemetry
     title: Per-verb Resource interface, registry, OTel decorator, mocks
-    status: proposed
+    status: done
     depends: [plugin-runtime]
-    decisions: [D15, D17, D21]
+    decisions: [D15, D17, D21, D30, D31, D32, D33]
     scope:
       - >-
         `internal/resource/`: the `Resource` interface (`Get`/`Create`/
