@@ -682,3 +682,33 @@ func TestBranchRejectsAMismatchedDriver(t *testing.T) {
 		t.Fatal("the API was called despite the mismatch")
 	}
 }
+
+// TestRegistrationsOmitTheCompanionWithoutAClient: a caller with no
+// Cloudflare client has no Cloudflare credentials, which happens precisely
+// when nothing in the manifest names Cloudflare — and the companion would be
+// conditioned out anyway. Registering it against a nil client would leave a
+// resource that panics if anything ever did reach it, in exchange for
+// nothing.
+func TestRegistrationsOmitTheCompanionWithoutAClient(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+
+	withClient := Registrations(nc, &cloudflare.Client{}, settings())
+	if len(withClient) != 2 {
+		t.Fatalf("with a Cloudflare client: %d registrations, want branch and hyperdrive", len(withClient))
+	}
+
+	without := Registrations(nc, nil, settings())
+	if len(without) != 1 || without[0].Type != TypeBranch {
+		t.Fatalf("with no Cloudflare client: %+v, want the branch alone", without)
+	}
+
+	// And Register agrees, so an assembler wiring only Neon gets a usable
+	// registry rather than one holding an unusable entry.
+	reg := resource.NewRegistry()
+	if err := Register(reg, nc, nil, settings()); err != nil {
+		t.Fatalf("Register with no Cloudflare client: %v", err)
+	}
+	if _, ok := reg.Lookup("cloudflare/hyperdrive"); ok {
+		t.Fatal("a Hyperdrive config was registered with no client to create it")
+	}
+}

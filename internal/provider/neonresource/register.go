@@ -22,10 +22,18 @@ func Register(reg *resource.Registry, neonClient *neon.Client, cfClient *cloudfl
 	return nil
 }
 
-// Registrations returns the Postgres capability's registrations, in the phase
+// Registrations returns the database capability's registrations, in the phase
 // order they are applied.
+//
+// A nil cfClient omits the Hyperdrive companion entirely. That is the same
+// rule its When condition expresses, answered one step earlier: a caller with
+// no Cloudflare client has no Cloudflare credentials, which happens precisely
+// when nothing in the manifest names Cloudflare — and in that case the
+// companion would be conditioned out anyway. Registering it with a nil client
+// would leave a resource that panics if anything ever did reach it, in
+// exchange for nothing.
 func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, settings BranchSettings) []resource.Registration {
-	return []resource.Registration{
+	regs := []resource.Registration{
 		{
 			Provider: Provider, Type: TypeBranch,
 			Capability: Capability,
@@ -35,27 +43,30 @@ func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, setting
 			Lookup:   resource.LookupByAttr,
 			Resource: &branchResource{client: neonClient, settings: settings},
 		},
-		{
-			Provider: HyperdriveProvider, Type: TypeHyperdrive,
-			Capability: Capability,
-			// Cloudflare's API creates it, but choosing Neon for the database
-			// is what asks for it — so a manifest saying vendor: neon must
-			// reach this too, or the branch is provisioned with nothing in
-			// front of it and no Worker can connect.
-			Vendor: Provider,
-			// Only when the compute side is Workers. Hyperdrive is a Workers
-			// connection pooler: a Lambda or a container connects to the
-			// branch directly over the Postgres wire and would never route
-			// through it. Planning one anyway demands a Cloudflare account
-			// that deployment has no reason to hold, to create something
-			// nothing will ever connect through.
-			When: resource.RequiresCapabilityVendor(manifest.CapabilityCompute, HyperdriveProvider),
-			// After the branch, whose connection string it consumes.
-			Phase:    resource.PhaseStorage,
-			Lookup:   resource.LookupByAttr,
-			Resource: &hyperdriveResource{client: cfClient},
-		},
 	}
+	if cfClient == nil {
+		return regs
+	}
+	return append(regs, resource.Registration{
+		Provider: HyperdriveProvider, Type: TypeHyperdrive,
+		Capability: Capability,
+		// Cloudflare's API creates it, but choosing Neon for the database
+		// is what asks for it — so a manifest saying vendor: neon must
+		// reach this too, or the branch is provisioned with nothing in
+		// front of it and no Worker can connect.
+		Vendor: Provider,
+		// Only when the compute side is Workers. Hyperdrive is a Workers
+		// connection pooler: a Lambda or a container connects to the
+		// branch directly over the Postgres wire and would never route
+		// through it. Planning one anyway demands a Cloudflare account
+		// that deployment has no reason to hold, to create something
+		// nothing will ever connect through.
+		When: resource.RequiresCapabilityVendor(manifest.CapabilityCompute, HyperdriveProvider),
+		// After the branch, whose connection string it consumes.
+		Phase:    resource.PhaseStorage,
+		Lookup:   resource.LookupByAttr,
+		Resource: &hyperdriveResource{client: cfClient},
+	})
 }
 
 // DecodeSettings reads BranchSettings from a manifest entry's provider

@@ -67,12 +67,22 @@ func Registry(ctx context.Context, m *manifest.Manifest) (*resource.Registry, er
 	neonProvider, wantsNeon := vendors[vendorNeon]
 	awsProvider, wantsAWS := vendors[vendorAWS]
 
-	// A Postgres binding on Neon is a branch plus the Cloudflare Hyperdrive
-	// configuration fronting it (D30) — choosing neon always needs a
-	// Cloudflare client too, whether or not any capability itself named the
+	// A Cloudflare client is built only when a capability actually names the
 	// cloudflare vendor.
+	//
+	// Choosing Neon does not imply one. Neon's registrations include a
+	// Cloudflare Hyperdrive companion (D30), but that companion applies only
+	// when the compute side is Cloudflare too (D36) — a Neon database serving
+	// an AWS Lambda connects directly over the Postgres wire and never routes
+	// through it. Requiring a Cloudflare token here regardless would refuse
+	// to plan an AWS application over credentials it has no reason to hold,
+	// for a resource that would never be created.
+	//
+	// The condition is not restated here: neonresource omits the companion
+	// when handed no client, so the rule lives in one place and this function
+	// only answers whether a client exists to hand over.
 	var cfClient *cloudflare.Client
-	if wantsCloudflare || wantsNeon {
+	if wantsCloudflare {
 		cfClient, err = cloudflareClient()
 		if err != nil {
 			return nil, err

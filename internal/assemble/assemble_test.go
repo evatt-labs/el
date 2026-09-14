@@ -152,10 +152,15 @@ func TestRegistry_NeonMissingNeonCredentials(t *testing.T) {
 	}
 }
 
-func TestRegistry_NeonMissingCloudflareCredentials(t *testing.T) {
-	// Choosing neon for postgres always needs Cloudflare credentials too,
-	// for the Hyperdrive companion (D30) — even though no capability named
-	// the cloudflare vendor itself.
+// TestRegistry_NeonWithoutCloudflareNeedsNoCloudflareCredentials is the
+// case kraai-api actually is: a Neon database serving AWS Lambda.
+//
+// Neon's registrations include a Cloudflare Hyperdrive companion, but that
+// companion applies only when the compute side is Cloudflare too (D36) — a
+// Lambda connects to the branch directly over the Postgres wire. Demanding a
+// Cloudflare token here would refuse to plan the application over credentials
+// it has no reason to hold, for a resource that would never be created.
+func TestRegistry_NeonWithoutCloudflareNeedsNoCloudflareCredentials(t *testing.T) {
 	clearCreds(t)
 	setNeonCreds(t)
 
@@ -165,12 +170,17 @@ func TestRegistry_NeonMissingCloudflareCredentials(t *testing.T) {
 		}},
 	})
 
-	_, err := Registry(context.Background(), m)
-	if err == nil {
-		t.Fatal("expected an error")
+	reg, err := Registry(context.Background(), m)
+	if err != nil {
+		t.Fatalf("assembling a Neon database with no Cloudflare credentials: %v", err)
 	}
-	if !strings.Contains(err.Error(), envCloudflareAPIToken) {
-		t.Fatalf("error did not name the missing cloudflare token: %v", err)
+	if _, ok := reg.Lookup("neon/branch"); !ok {
+		t.Error("expected neon/branch to be registered")
+	}
+	// And the companion is absent rather than registered against a client
+	// that does not exist.
+	if _, ok := reg.Lookup("cloudflare/hyperdrive"); ok {
+		t.Error("a Hyperdrive config was registered with no Cloudflare client to create it")
 	}
 }
 
@@ -195,12 +205,14 @@ func TestRegistry_NeonBadSettings(t *testing.T) {
 	}
 }
 
-func TestRegistry_NeonSuccess(t *testing.T) {
+func TestRegistry_NeonAlongsideCloudflareRegistersBothHalves(t *testing.T) {
 	clearCreds(t)
 	setCloudflareCreds(t)
 	setNeonCreds(t)
 
+	// Compute on Cloudflare, so the Hyperdrive companion genuinely applies.
 	m := manifestWith(manifest.Providers{
+		Compute: &manifest.Provider{Vendor: vendorCloudflare},
 		Database: &manifest.Provider{Vendor: vendorNeon, Settings: map[string]any{
 			"project": "proj", "database": "db", "role": "role",
 		}},
@@ -210,9 +222,8 @@ func TestRegistry_NeonSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Registry: %v", err)
 	}
-	// Both halves of choosing neon for the database capability: the branch
-	// and the Cloudflare Hyperdrive configuration fronting it (D30) — the
-	// known issue this assembler was told to leave alone, not work around.
+	// Both halves of choosing Neon when the compute side is Workers: the
+	// branch, and the configuration fronting it (D30).
 	if _, ok := reg.Lookup("neon/branch"); !ok {
 		t.Error("expected neon/branch to be registered")
 	}
