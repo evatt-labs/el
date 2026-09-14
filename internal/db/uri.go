@@ -20,6 +20,7 @@
 package db
 
 import (
+	"net"
 	"net/url"
 	"strconv"
 
@@ -114,15 +115,26 @@ func trimLeadingSlash(s string) string {
 	return s
 }
 
-// Env renders the connection as the PG* environment variables psql reads,
-// as KEY=VALUE pairs ready to append to a child process environment.
-func (c ConnectionInfo) Env() []string {
-	return []string{
-		"PGHOST=" + c.Host,
-		"PGPORT=" + strconv.Itoa(c.Port),
-		"PGUSER=" + c.User,
-		"PGPASSWORD=" + c.Password,
-		"PGDATABASE=" + c.Database,
-		"PGSSLMODE=" + c.SSLMode,
+// DSN renders the connection as a URI for the driver.
+//
+// The password is carried here because a driver needs it; this value is a
+// live credential and must never be logged, embedded in an error, or passed
+// as a command-line argument. Use Redacted for anything a human will read.
+func (c ConnectionInfo) DSN() string {
+	u := url.URL{
+		Scheme: c.Scheme,
+		User:   url.UserPassword(c.User, c.Password),
+		Host:   net.JoinHostPort(c.Host, strconv.Itoa(c.Port)),
+		Path:   "/" + c.Database,
 	}
+	q := url.Values{}
+	q.Set("sslmode", c.SSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// Redacted renders the connection for human consumption, with no credential
+// in it. This is what belongs in an error or a log line.
+func (c ConnectionInfo) Redacted() string {
+	return c.Host + ":" + strconv.Itoa(c.Port) + "/" + c.Database
 }

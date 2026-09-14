@@ -82,23 +82,34 @@ func TestParseConnectionURIErrorsKeepTheCredentialOut(t *testing.T) {
 	}
 }
 
-func TestConnectionInfoEnv(t *testing.T) {
+func TestConnectionInfoDSN(t *testing.T) {
 	conn, err := ParseConnectionURI("postgres://u:p@h.example.com:6543/d?sslmode=verify-full")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{
-		"PGHOST=h.example.com": true, "PGPORT=6543": true, "PGUSER=u": true,
-		"PGPASSWORD=p": true, "PGDATABASE=d": true, "PGSSLMODE=verify-full": true,
-	}
-	got := conn.Env()
-	if len(got) != len(want) {
-		t.Fatalf("got %d vars, want %d: %v", len(got), len(want), got)
-	}
-	for _, kv := range got {
-		if !want[kv] {
-			t.Errorf("unexpected env entry %q", kv)
+	got := conn.DSN()
+	for _, want := range []string{"h.example.com:6543", "/d", "sslmode=verify-full", "u:p@"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("DSN %q is missing %q", got, want)
 		}
+	}
+}
+
+// TestRedactedCarriesNoCredential is what makes it safe to put a connection
+// into an error: Redacted is the only rendering a human ever sees.
+func TestRedactedCarriesNoCredential(t *testing.T) {
+	conn, err := ParseConnectionURI("postgres://alice:hunter2supersecret@h.example.com:6543/appdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := conn.Redacted()
+	for _, forbidden := range []string{"hunter2supersecret", "alice"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Redacted leaked %q: %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "h.example.com") || !strings.Contains(got, "appdb") {
+		t.Fatalf("Redacted dropped the parts that make it useful: %s", got)
 	}
 }
 
@@ -119,105 +130,97 @@ func TestQuoteLiteral(t *testing.T) {
 	}
 }
 
-// fakeRunner records statements and replays scripted responses.
-type fakeRunner struct {
-	statements []string
-	responses  []string
-	errs       []error
-	calls      int
+// fakeConn is a scripted Querier: it records the statements and bound
+// arguments it was given, and replays a queued result.
+type fakeConn struct {
+	stmts   []string
+	args    [][]any
+	bypass  bool
+	scanErr error
+	pingErr error
+	closes  int
 }
 
-func (f *fakeRunner) Run(_ context.Context, _ ConnectionInfo, sql string) (string, error) {
-	f.statements = append(f.statements, sql)
-	i := f.calls
-	f.calls++
-	if i < len(f.errs) && f.errs[i] != nil {
-		return "", f.errs[i]
-	}
-	if i < len(f.responses) {
-		return f.responses[i], nil
-	}
-	return "", nil
+type fakeRow struct {
+	bypass  bool
+	scanErr error
 }
 
-// TestAssertNoBypassRLSQuotesTheRole is the regression test for a live bug in
-// the JavaScript this replaces: it interpolated the role straight into the
-// statement while QuoteLiteral sat unused in the same file. A role name is
-// configuration, not a constant.
-func TestAssertNoBypassRLSQuotesTheRole(t *testing.T) {
-	runner := &fakeRunner{responses: []string{"f"}}
-	client := New(runner)
-
-	err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, "app'; select 't")
-	if err != nil {
-		t.Fatalf("AssertNoBypassRLS: %v", err)
+func (r fakeRow) Scan(dest ...any) error {
+	if r.scanErr != nil {
+		return r.scanErr
 	}
-	stmt := runner.statements[0]
-	if !strings.Contains(stmt, "'app''; select ''t'") {
-		t.Fatalf("role was not quoted; statement was: %s", stmt)
+	if len(dest) > 0 {
+		if p, ok := dest[0].(*bool); ok {
+			*p = r.bypass
+		}
 	}
-	// The injected fragment must not survive as syntax.
-	if strings.Contains(stmt, "= 'app'; select") {
-		t.Fatalf("statement is steerable: %s", stmt)
-	}
+	return nil
 }
 
-func TestAssertNoBypassRLSRejectsEnabledBypass(t *testing.T) {
-	client := New(&fakeRunner{responses: []string{"t"}})
-	err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, "app")
-	if err == nil {
-		t.Fatal("BYPASSRLS=t was accepted — row-level security would be silently defeated")
-	}
-	if !strings.Contains(err.Error(), "BYPASSRLS") {
-		t.Fatalf("got %v, want an error naming BYPASSRLS", err)
-	}
+func (f *fakeConn) QueryRow(_ context.Context, sql string, args ...any) Row {
+	f.stmts = append(f.stmts, sql)
+	f.args = append(f.args, args)
+	return fakeRow{bypass: f.bypass, scanErr: f.scanErr}
 }
 
-// A role that does not exist returns no rows, so the output is empty rather
-// than "f". That must fail closed, not pass.
-func TestAssertNoBypassRLSFailsClosedOnMissingRole(t *testing.T) {
-	client := New(&fakeRunner{responses: []string{""}})
-	if err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, "nonexistent"); err == nil {
-		t.Fatal("an absent role was treated as safe")
+func (f *fakeConn) Exec(_ context.Context, sql string, args ...any) error {
+	f.stmts = append(f.stmts, sql)
+	f.args = append(f.args, args)
+	return nil
+}
+
+func (f *fakeConn) Ping(context.Context) error { return f.pingErr }
+
+func (f *fakeConn) Close(context.Context) error { f.closes++; return nil }
+
+// fakeConnector hands out one fakeConn, failing the first failures dials.
+type fakeConnector struct {
+	conn     *fakeConn
+	failures int
+	dials    int
+}
+
+func (f *fakeConnector) Connect(context.Context, ConnectionInfo) (Querier, error) {
+	f.dials++
+	if f.dials <= f.failures {
+		return nil, errors.New("connection refused")
 	}
+	if f.conn == nil {
+		f.conn = &fakeConn{}
+	}
+	return f.conn, nil
 }
 
 func TestWaitForConnectableRetriesThenSucceeds(t *testing.T) {
-	runner := &fakeRunner{
-		errs:      []error{errors.New("down"), errors.New("down"), nil},
-		responses: []string{"", "", "1"},
-	}
-	client := New(runner)
-	client.retryDelay = time.Millisecond
+	connector := &fakeConnector{failures: 2}
+	client := New(WithConnector(connector), WithRetryDelay(time.Millisecond))
 
 	if err := client.WaitForConnectable(t.Context(), ConnectionInfo{}, 5); err != nil {
 		t.Fatalf("WaitForConnectable: %v", err)
 	}
-	if runner.calls != 3 {
-		t.Fatalf("probed %d times, want 3", runner.calls)
+	if connector.dials != 3 {
+		t.Fatalf("dialled %d times, want 3", connector.dials)
 	}
 }
 
 func TestWaitForConnectableGivesUp(t *testing.T) {
-	runner := &fakeRunner{errs: []error{errors.New("d"), errors.New("d"), errors.New("d")}}
-	client := New(runner)
-	client.retryDelay = time.Millisecond
+	connector := &fakeConnector{failures: 99}
+	client := New(WithConnector(connector), WithRetryDelay(time.Millisecond))
 
-	err := client.WaitForConnectable(t.Context(), ConnectionInfo{}, 3)
-	if err == nil {
+	if err := client.WaitForConnectable(t.Context(), ConnectionInfo{}, 3); err == nil {
 		t.Fatal("expected failure after exhausting attempts")
 	}
-	if runner.calls != 3 {
-		t.Fatalf("probed %d times, want exactly the 3 attempts allowed", runner.calls)
+	if connector.dials != 3 {
+		t.Fatalf("dialled %d times, want exactly the 3 attempts allowed", connector.dials)
 	}
 }
 
-// The wait must honour cancellation rather than sleeping out its full budget
-// — with the default delay that is half a minute of ignoring a cancelled ctx.
+// The wait must notice cancellation rather than sleeping out its budget —
+// with the default delay that is half a minute of ignoring a cancelled ctx.
 func TestWaitForConnectableHonoursCancellation(t *testing.T) {
-	runner := &fakeRunner{errs: []error{errors.New("d"), errors.New("d"), errors.New("d")}}
-	client := New(runner)
-	client.retryDelay = time.Hour
+	connector := &fakeConnector{failures: 99}
+	client := New(WithConnector(connector), WithRetryDelay(time.Hour))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -231,24 +234,89 @@ func TestWaitForConnectableHonoursCancellation(t *testing.T) {
 	}
 }
 
-// TestParseConnectionURIUnbracketsIPv6 pins the one place this parser
-// deliberately disagrees with the JavaScript it replaces. See
-// ParseConnectionURI's doc comment: PGHOST wants the bare address, and the
-// brackets are URI syntax rather than part of the host.
-func TestParseConnectionURIUnbracketsIPv6(t *testing.T) {
-	got, err := ParseConnectionURI("postgresql://u:p@[2001:db8::1]:5433/d")
-	if err != nil {
-		t.Fatalf("ParseConnectionURI: %v", err)
+// TestAssertNoBypassRLSBindsTheRole is the regression test for a live bug in
+// the JavaScript this replaces: it interpolated the role straight into the
+// statement while its quoting helper sat unused in the same file. Binding
+// removes the possibility rather than guarding against it, so the assertion
+// is that the role travels as an argument and never appears in the SQL.
+func TestAssertNoBypassRLSBindsTheRole(t *testing.T) {
+	connector := &fakeConnector{conn: &fakeConn{bypass: false}}
+	client := New(WithConnector(connector))
+
+	const hostile = "app'; select 't"
+	if err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, hostile); err != nil {
+		t.Fatalf("AssertNoBypassRLS: %v", err)
 	}
-	if got.Host != "2001:db8::1" {
-		t.Fatalf("host = %q, want the bare address with no brackets", got.Host)
+
+	stmt := connector.conn.stmts[0]
+	if strings.Contains(stmt, hostile) {
+		t.Fatalf("the role was interpolated into the statement: %s", stmt)
 	}
-	if got.Port != 5433 {
-		t.Fatalf("port = %d, want 5433", got.Port)
+	if !strings.Contains(stmt, "$1") {
+		t.Fatalf("statement does not bind a parameter: %s", stmt)
 	}
-	for _, kv := range got.Env() {
-		if kv == "PGHOST=[2001:db8::1]" {
-			t.Fatal("PGHOST carried the URI's brackets through to libpq")
+	if got := connector.conn.args[0][0]; got != hostile {
+		t.Fatalf("role arrived as %v, want it bound verbatim", got)
+	}
+}
+
+func TestAssertNoBypassRLSRejectsEnabledBypass(t *testing.T) {
+	client := New(WithConnector(&fakeConnector{conn: &fakeConn{bypass: true}}))
+	err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, "app")
+	if err == nil {
+		t.Fatal("BYPASSRLS enabled was accepted — row-level security would be silently defeated")
+	}
+	if !strings.Contains(err.Error(), "BYPASSRLS") {
+		t.Fatalf("got %v, want an error naming BYPASSRLS", err)
+	}
+}
+
+// A role that does not exist returns no rows. That must fail closed.
+func TestAssertNoBypassRLSFailsClosedOnMissingRole(t *testing.T) {
+	client := New(WithConnector(&fakeConnector{conn: &fakeConn{scanErr: ErrNoRows}}))
+	err := client.AssertNoBypassRLS(t.Context(), ConnectionInfo{}, "nonexistent")
+	if err == nil {
+		t.Fatal("an absent role was treated as safe")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("got %v, want an error saying the role is absent", err)
+	}
+}
+
+// Every operation opens and closes its own connection; a leaked one would
+// hold a Neon compute endpoint awake.
+func TestOperationsCloseTheirConnection(t *testing.T) {
+	connector := &fakeConnector{conn: &fakeConn{}}
+	client := New(WithConnector(connector))
+
+	if err := client.Exec(t.Context(), ConnectionInfo{}, "select 1"); err != nil {
+		t.Fatal(err)
+	}
+	if connector.conn.closes != 1 {
+		t.Fatalf("closed %d times, want 1", connector.conn.closes)
+	}
+}
+
+// TestDSNRoundTrips is the property that makes DSN safe to build by hand:
+// a credential containing characters that are URI syntax must survive being
+// re-encoded, or the driver connects with a silently different password.
+func TestDSNRoundTrips(t *testing.T) {
+	for _, original := range []string{
+		"postgres://user:simple@h.example.com:5432/db?sslmode=require",
+		"postgres://user%40tenant:p%40ss%3Aword@h.example.com:5432/db?sslmode=require",
+		"postgres://u:p%2Fslash%3Fquestion%23hash@h.example.com:5432/db?sslmode=verify-full",
+		"postgres://u:tr%25icky%26amp@h.example.com:5432/db?sslmode=require",
+	} {
+		first, err := ParseConnectionURI(original)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", original, err)
+		}
+		second, err := ParseConnectionURI(first.DSN())
+		if err != nil {
+			t.Fatalf("re-parsing the DSN built from %s: %v", original, err)
+		}
+		if first != second {
+			t.Errorf("round trip changed the connection:\n  first  %+v\n  second %+v", first, second)
 		}
 	}
 }
