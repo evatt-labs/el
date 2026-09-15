@@ -197,12 +197,12 @@ func (a *Applier) execute(
 	key := bindingKey{ServiceKey: act.ServiceKey, Binding: act.Binding}
 	spec := act.Spec
 	// Populate this action's own credentials from whatever an earlier
-	// action for the same binding has produced so far — see the package
-	// doc's secret-scoping section. Harmless when nothing is registered
-	// yet: forSpec returns nil, and Spec.Secret already reports a clear
-	// "no such credential" error naming the binding if this action turns
-	// out to need one anyway.
-	spec.Secrets = secrets.forSpec(key)
+	// action for any of its readable bindings has produced so far — see the
+	// package doc's secret-scoping section. Harmless when nothing is
+	// registered yet: forAction returns nil, and Spec.Secret already
+	// reports a clear "no such credential" error naming the binding if this
+	// action turns out to need one anyway.
+	spec.Secrets = secrets.forAction(act.ServiceKey, act.Binding, effectiveReadsBindings(act))
 
 	state, outcome, err := a.mutate(ctx, act, reg.Resource, spec)
 	if err != nil {
@@ -224,6 +224,25 @@ func (a *Applier) execute(
 		}
 	}
 	return result
+}
+
+// effectiveReadsBindings names the bindings act may read secrets from:
+// act.ReadsBindings as the planner set it, or act.Binding alone as an
+// explicit fallback when the planner left it empty or nil.
+//
+// internal/plan/planner.go always populates ReadsBindings today (see
+// Item's doc comment), but this package does not trust that invariant
+// blindly across the package boundary — the same defensive stance mutate
+// takes toward ActionNoChange's Current field below (Rule 5: avoid silent
+// assumptions). Falling back to act.Binding rather than an empty slice
+// means an action whose plan predates this field, or that some future
+// planner path forgets to set it, keeps seeing exactly its own binding's
+// secrets instead of silently seeing none.
+func effectiveReadsBindings(act plan.Action) []string {
+	if len(act.ReadsBindings) > 0 {
+		return act.ReadsBindings
+	}
+	return []string{act.Binding}
 }
 
 // mutate performs the actual provider call(s) for one action's Kind and
