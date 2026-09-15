@@ -414,6 +414,68 @@ func TestLoad_RootReadErrorIsWrapped(t *testing.T) {
 	_ = requireCode(t, err, kerrors.CodeValidation)
 }
 
+// TestLoad_PerServiceComputeParses is the schema half of the
+// per-service-compute workstream's acceptance criterion: a manifest shaped
+// like kraai-api's real one (services/api.yaml.j2's `tick` workaround
+// replaced with a proper compute: block) loads with each service's own
+// trigger, handler, schedule and settings intact, and a service's compute
+// settings distinct from the provider's.
+func TestLoad_PerServiceComputeParses(t *testing.T) {
+	loader := newRealLoader(t, "testdata/per-service-compute")
+
+	got, err := loader.Load("dev", nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	api := got.Services["api"]
+	if api.Compute == nil {
+		t.Fatalf("api.Compute is nil")
+	}
+	if api.Compute.Trigger != manifest.TriggerHTTP {
+		t.Errorf("api.Compute.Trigger = %q, want %q", api.Compute.Trigger, manifest.TriggerHTTP)
+	}
+	if api.Compute.Handler != "app.main.handler" {
+		t.Errorf("api.Compute.Handler = %q", api.Compute.Handler)
+	}
+	if api.Compute.Schedule != "" {
+		t.Errorf("api.Compute.Schedule = %q, want empty: api is HTTP-triggered", api.Compute.Schedule)
+	}
+
+	tick := got.Services["tick"]
+	if tick.Compute == nil {
+		t.Fatalf("tick.Compute is nil")
+	}
+	if tick.Compute.Trigger != manifest.TriggerSchedule {
+		t.Errorf("tick.Compute.Trigger = %q, want %q", tick.Compute.Trigger, manifest.TriggerSchedule)
+	}
+	if tick.Compute.Schedule != "rate(5 minutes)" {
+		t.Errorf("tick.Compute.Schedule = %q", tick.Compute.Schedule)
+	}
+	if tick.Compute.Settings["reservedConcurrency"] != 1 {
+		t.Errorf("tick.Compute.Settings[reservedConcurrency] = %v, want the service's own override",
+			tick.Compute.Settings["reservedConcurrency"])
+	}
+
+	// The provider-level block is untouched by any service's override —
+	// merging (internal/plan's job) happens later, against a copy.
+	if got.Root.Providers.Compute.Settings["runtime"] != "python3.14" {
+		t.Errorf("provider settings = %+v", got.Root.Providers.Compute.Settings)
+	}
+}
+
+// TestLoad_UnknownTriggerIsValidationError covers the trigger enum
+// rejecting a value outside {http, schedule}, naming the offending service
+// and value the same way every other schema violation in this package does.
+func TestLoad_UnknownTriggerIsValidationError(t *testing.T) {
+	loader := newRealLoader(t, "testdata/bad-trigger")
+	_, err := loader.Load("dev", nil)
+	kerr := requireCode(t, err, kerrors.CodeValidation)
+	if !strings.Contains(kerr.Error(), "services.tick.compute.trigger") || !strings.Contains(kerr.Error(), `"cron"`) {
+		t.Errorf("error %q does not name the bad trigger", kerr.Error())
+	}
+}
+
 // fsNotExistErr builds the same *fs.PathError shape a real FS
 // implementation returns for a missing file, so mock-based tests exercise
 // the errors.Is(err, fs.ErrNotExist) branch exactly as production code

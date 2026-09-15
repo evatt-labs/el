@@ -407,3 +407,35 @@ func TestResolveRequiresAVendorForTheCapability(t *testing.T) {
 		t.Fatal("resolved a capability with no vendor configured")
 	}
 }
+
+// TestAppliesToTrigger pins the per-service-compute trigger-filtering
+// contract: a registration with no Triggers never cares what a service
+// declares, a registration with Triggers matches only a listed value, and
+// a service declaring no trigger at all (trigger == "") always matches —
+// the exact rule that keeps a manifest with no compute: block behaving as
+// it did before this field existed.
+func TestAppliesToTrigger(t *testing.T) {
+	cases := []struct {
+		name     string
+		triggers []string
+		trigger  string
+		want     bool
+	}{
+		{"untriggered registration matches an http service", nil, "http", true},
+		{"untriggered registration matches a schedule service", nil, "schedule", true},
+		{"untriggered registration matches a service with no trigger", nil, "", true},
+		{"http-gated registration matches an http service", []string{"http"}, "http", true},
+		{"http-gated registration rejects a schedule service", []string{"http"}, "schedule", false},
+		{"http-gated registration matches a service with no trigger", []string{"http"}, "", true},
+		{"multi-value Triggers matches any listed value", []string{"http", "schedule"}, "schedule", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reg := Registration{Triggers: c.triggers}
+			if got := reg.AppliesToTrigger(c.trigger); got != c.want {
+				t.Fatalf("AppliesToTrigger(%q) with Triggers=%v = %v, want %v",
+					c.trigger, c.triggers, got, c.want)
+			}
+		})
+	}
+}

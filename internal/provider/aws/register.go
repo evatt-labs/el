@@ -157,6 +157,12 @@ func Registrations(client *Client) []resource.Registration {
 			Provider: Provider, Type: TypeLambdaFunction,
 			Capability: manifest.CapabilityCompute,
 			Phase:      resource.PhaseCompute,
+			// No Triggers restriction: every service with AWS compute gets
+			// a Lambda function regardless of how it's invoked — an HTTP
+			// handler and a scheduled handler are both, in the end, a
+			// function. What differs between them (the API Gateway in
+			// front, or not) is the other registration below.
+			//
 			// FunctionName is settable at create; CloudFormation marks it
 			// "Update requires: Replacement", i.e. a createOnlyProperty and
 			// this type's Ref (aws-resource-lambda-function.html) — D7's
@@ -168,6 +174,19 @@ func Registrations(client *Client) []resource.Registration {
 			Provider: Provider, Type: TypeAPIGatewayV2API,
 			Capability: manifest.CapabilityCompute,
 			Phase:      resource.PhaseCompute,
+			// Triggers: only a service that declares itself HTTP-facing
+			// gets an API Gateway. This is the per-service-compute
+			// workstream's fix for the bug that motivated it: before
+			// Triggers existed, every service using the compute capability
+			// got both types this package registers under it, so a
+			// schedule-invoked worker with no HTTP surface (kraai-api's
+			// `tick`) planned an API Gateway nothing would ever call — not
+			// merely redundant output, but a real, wrong resource once
+			// `kraai apply` executes the plan. A service that declares no
+			// compute: block at all still gets both, per
+			// Registration.AppliesToTrigger's trigger=="" case — unchanged
+			// from before this field existed.
+			Triggers: []string{manifest.TriggerHTTP},
 			// Not byName: Name is mutable ("Update requires: No
 			// interruption" — not even createOnly) and AWS documents no
 			// uniqueness constraint on it. See apigatewayv2Match's doc

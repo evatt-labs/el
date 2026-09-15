@@ -143,11 +143,93 @@ type ServicesFile struct {
 // Service is one service entry under services/*.yaml's top-level
 // `services:` map.
 type Service struct {
-	Dir       string        `yaml:"dir"`
+	Dir     string   `yaml:"dir"`
+	Compute *Compute `yaml:"compute,omitempty"`
+
 	Databases []Database    `yaml:"databases,omitempty"`
 	KeyValue  []KeyValue    `yaml:"keyvalue,omitempty"`
 	Objects   []ObjectStore `yaml:"objects,omitempty"`
 	Queues    []Queue       `yaml:"queues,omitempty"`
+}
+
+// Compute is a service's own compute shape: how it is invoked, and its own
+// settings layered over providers.compute.settings (D34).
+//
+// The whole block is optional. A Service with a nil Compute behaves exactly
+// as one always has: every resource type the configured compute vendor
+// registers is planned for it, unconditioned on trigger. Only a service
+// that opts in by declaring Compute gets trigger-gated resources — see
+// resource.Registration.Triggers and internal/plan's expandCompute.
+type Compute struct {
+	// Trigger is what invokes this service: TriggerHTTP for a service
+	// fronted by an HTTP API/gateway, TriggerSchedule for one invoked on a
+	// cron-like schedule with no HTTP surface at all.
+	//
+	// An enum, deliberately unlike Database.Driver. Driver flows opaquely
+	// into a resource's Spec.Config for the provider that owns the driver
+	// vocabulary to interpret and reject if unrecognized — this package has
+	// no business validating "postgres" versus "sqlite". Trigger is
+	// different: it is this package's own vocabulary, consumed here (by
+	// whatever synthesises compute resources) to decide which registered
+	// resource types even apply to a service. An unrecognized trigger
+	// silently matching no gated resource would read as "this service gets
+	// no HTTP surface" with no error explaining why — exactly the kind of
+	// silent failure Rule 20 exists to rule out. Validated in
+	// validateServices.
+	Trigger string `yaml:"trigger"`
+	// Handler is the function entrypoint this service's code exposes for
+	// this trigger, e.g. "app.main.handler". Free-form and
+	// provider-interpreted, like Settings below: which entrypoint shapes a
+	// given compute vendor expects is not this package's vocabulary.
+	Handler string `yaml:"handler,omitempty"`
+	// Schedule is the cron/rate expression driving a TriggerSchedule
+	// service, e.g. "rate(5 minutes)". Free-form for the same reason
+	// Handler is: the expression syntax is the compute vendor's, not a
+	// shape this package defines or checks.
+	Schedule string `yaml:"schedule,omitempty"`
+	// Settings is this service's own compute settings, layered over
+	// providers.compute.settings per top-level key rather than replacing it
+	// — see MergeSettings. Carries the same free-form exemption Provider.
+	// Settings does (D34, D5): uninterpreted here, decoded and validated by
+	// the compute provider.
+	Settings map[string]any `yaml:"settings,omitempty"`
+}
+
+// TriggerHTTP and TriggerSchedule are Compute's only valid Trigger values.
+const (
+	TriggerHTTP     = "http"
+	TriggerSchedule = "schedule"
+)
+
+// MergeSettings layers override's keys on top of base and returns a new
+// map: a key override sets wins, and every key it leaves unset keeps
+// base's value.
+//
+// Shallow, not deep, by design. Settings is free-form and
+// provider-interpreted (D34) — this package has no schema for what lives
+// inside a vendor's settings map, so it has no principled way to decide
+// whether two nested maps sharing a key describe the same concept and
+// should be merged field-by-field, or are unrelated shapes where the
+// second should simply replace the first. A shallow, top-level-key merge
+// sidesteps that question: whatever override sets for a key replaces
+// base's value for that key whole, however deeply nested that value is.
+// This is also the cheaper, more predictable contract for a manifest
+// author: "my key wins" needs no reasoning about how two arbitrarily
+// shaped values combine.
+//
+// This is exactly what per-service compute settings need: a service's
+// `reservedConcurrency` replaces the provider's, while `runtime` and
+// `architecture`, which the service never mentions, pass through
+// untouched. Neither argument is mutated.
+func MergeSettings(base, override map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(override))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range override {
+		merged[k] = v
+	}
+	return merged
 }
 
 // Database is one entry of a service's `databases:` list.

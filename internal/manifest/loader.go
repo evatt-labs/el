@@ -3,6 +3,7 @@ package manifest
 import (
 	"errors"
 	"io/fs"
+	"sort"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
@@ -48,6 +49,9 @@ func (l *Loader) Load(envName string, setArgs []string) (*Manifest, error) {
 
 	services, err := l.loadServices(values)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateServices(services); err != nil {
 		return nil, err
 	}
 
@@ -187,6 +191,35 @@ func (l *Loader) loadEnvironment(envName string) (*Environment, error) {
 		return nil, err
 	}
 	return &env, nil
+}
+
+// validateServices checks every field DecodeStrict cannot: not an unknown
+// key (that is strict-decoding's job), but a known field whose value falls
+// outside its declared vocabulary. Today that is exactly Compute.Trigger.
+//
+// Iterates services in sorted key order so a manifest with more than one
+// bad trigger reports the same one first on every run, rather than
+// whichever Go's map iteration happened to visit first.
+func validateServices(services map[string]Service) error {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		svc := services[name]
+		if svc.Compute == nil {
+			continue
+		}
+		switch svc.Compute.Trigger {
+		case TriggerHTTP, TriggerSchedule:
+		default:
+			return kerrors.Validation("services.%s.compute.trigger: must be %q or %q, got %q",
+				name, TriggerHTTP, TriggerSchedule, svc.Compute.Trigger)
+		}
+	}
+	return nil
 }
 
 func validateEnvironment(path string, env *Environment) error {

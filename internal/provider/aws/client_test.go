@@ -360,6 +360,16 @@ func TestNew(t *testing.T) {
 		}
 	})
 
+	t.Run("empty region defers to the SDK's own default chain instead of failing", func(t *testing.T) {
+		// No manifest region, and nothing to force LoadDefaultConfig itself
+		// to fail (unlike the malformed-shared-config subtest below): this
+		// proves settings.Region == "" is a legitimate "let the SDK decide"
+		// signal, not an error condition New has to reject.
+		if _, err := New(context.Background(), Settings{}); err != nil {
+			t.Fatalf("New with an empty region: %v", err)
+		}
+	})
+
 	t.Run("a config load failure is reported, not swallowed", func(t *testing.T) {
 		// A malformed shared config file is a deterministic way to make the
 		// SDK's own LoadDefaultConfig fail without touching the network or
