@@ -235,19 +235,71 @@ func (c *Client) GetResource(ctx context.Context, typeName, identifier string) (
 // partial, type-dependent properties map here would invite exactly the bug
 // this package's byAttr/byTag lookups must not have: trusting a field that
 // List never promised to populate.
-func (c *Client) ListResources(ctx context.Context, typeName string) ([]string, error) {
+//
+// # resourceModel: parent-scoped types
+//
+// Most Cloud Control list handlers enumerate every instance of typeName in
+// the account/region and resourceModel is nil. A parent-scoped type's list
+// handler instead requires a ResourceModel identifying the parent whose
+// instances to list — AWS::Lambda::Permission is the first this package
+// registers (resourceType.listScope), verified directly against Cloud
+// Control on the live Evatt Labs account (409032463870, us-east-1):
+//
+//	$ aws cloudcontrol list-resources --type-name AWS::Lambda::Permission --region us-east-1
+//	InvalidRequestException: Missing or invalid ResourceModel property in
+//	AWS::Lambda::Permission list handler request input. Required property:
+//	(#: required key [FunctionName] not found)
+//
+//	$ aws cloudcontrol list-resources --type-name AWS::Lambda::Permission \
+//	    --resource-model '{"FunctionName":"does-not-exist"}' --region us-east-1
+//	ResourceNotFoundException: AWS::Lambda::Permission Handler returned
+//	status FAILED: The resource you requested does not exist.
+//	(HandlerErrorCode: NotFound)
+//
+// The second call is the reason resourceModel != nil changes error
+// handling below, not just the request: naming a parent that does not
+// exist is reported as ResourceNotFoundException, not an empty result —
+// unlike every unscoped list handler this package has observed, where "no
+// instances" and "no error" are the same response. Translated to an empty
+// identifier list here, deliberately mirroring GetResource's own
+// absence-versus-failure contract: a permission's parent function not
+// existing yet means the permission does not exist yet either, which is
+// exactly the (nil, nil) Get must return for plan to report "create," not
+// "failed" (see resource.Resource's own doc comment). This translation is
+// gated on resourceModel != nil precisely because it was only ever
+// observed for a scoped list; an unscoped ListResources returning
+// ResourceNotFoundException remains a real, unexpected error, exactly as
+// it was before this parameter existed.
+func (c *Client) ListResources(ctx context.Context, typeName string, resourceModel map[string]any) ([]string, error) {
+	var modelJSON *string
+	if resourceModel != nil {
+		body, err := json.Marshal(resourceModel)
+		if err != nil {
+			return nil, kerrors.Wrap(err, kerrors.CodeUnexpected, "encoding resource model for listing %s", typeName)
+		}
+		s := string(body)
+		modelJSON = &s
+	}
+
 	var identifiers []string
 	var nextToken *string
 
 	for page := 0; page < maxListPages; page++ {
 		out, err := c.cc.ListResources(ctx, &cloudcontrol.ListResourcesInput{
-			TypeName:  aws.String(typeName),
-			NextToken: nextToken,
+			TypeName:      aws.String(typeName),
+			ResourceModel: modelJSON,
+			NextToken:     nextToken,
 		})
 		if err != nil {
-			var notFound *cctypes.TypeNotFoundException
-			if errors.As(err, &notFound) {
+			var notFoundType *cctypes.TypeNotFoundException
+			if errors.As(err, &notFoundType) {
 				return nil, kerrors.Wrap(err, kerrors.CodeValidation, "AWS Cloud Control has no registered type %q", typeName)
+			}
+			if modelJSON != nil {
+				var notFoundResource *cctypes.ResourceNotFoundException
+				if errors.As(err, &notFoundResource) {
+					return nil, nil
+				}
 			}
 			return nil, kerrors.Wrap(err, kerrors.CodeUnexpected, "listing %s", typeName)
 		}

@@ -225,7 +225,7 @@ func TestClientListResources(t *testing.T) {
 		}}
 		c := &Client{cc: cc}
 
-		ids, err := c.ListResources(context.Background(), TypeLambdaFunction)
+		ids, err := c.ListResources(context.Background(), TypeLambdaFunction, nil)
 		if err != nil {
 			t.Fatalf("ListResources: %v", err)
 		}
@@ -241,13 +241,34 @@ func TestClientListResources(t *testing.T) {
 		if len(cc.listReq) != 2 || *cc.listReq[1].NextToken != "page-2" {
 			t.Fatalf("second page request = %+v", cc.listReq)
 		}
+		if cc.listReq[0].ResourceModel != nil {
+			t.Fatalf("ResourceModel = %v, want nil for an unscoped list", *cc.listReq[0].ResourceModel)
+		}
+	})
+
+	t.Run("a non-nil resourceModel is marshaled onto the request", func(t *testing.T) {
+		cc := &fakeCC{listOut: []*cloudcontrol.ListResourcesOutput{{
+			ResourceDescriptions: []cctypes.ResourceDescription{{Identifier: aws.String("perm1")}},
+		}}}
+		c := &Client{cc: cc}
+
+		_, err := c.ListResources(context.Background(), realTypeLambdaPermission, map[string]any{"FunctionName": "myenv-api"})
+		if err != nil {
+			t.Fatalf("ListResources: %v", err)
+		}
+		if len(cc.listReq) != 1 || cc.listReq[0].ResourceModel == nil {
+			t.Fatalf("listReq = %+v, want exactly one request carrying a ResourceModel", cc.listReq)
+		}
+		if got, want := *cc.listReq[0].ResourceModel, `{"FunctionName":"myenv-api"}`; got != want {
+			t.Fatalf("ResourceModel = %q, want %q", got, want)
+		}
 	})
 
 	t.Run("TypeNotFoundException is reported, not treated as empty", func(t *testing.T) {
 		cc := &fakeCC{listErr: &cctypes.TypeNotFoundException{Message: aws.String("no such type")}}
 		c := &Client{cc: cc}
 
-		ids, err := c.ListResources(context.Background(), "AWS::Bogus::Type")
+		ids, err := c.ListResources(context.Background(), "AWS::Bogus::Type", nil)
 		if err == nil {
 			t.Fatal("expected an error")
 		}
@@ -260,8 +281,47 @@ func TestClientListResources(t *testing.T) {
 		cc := &fakeCC{listErr: &cctypes.ThrottlingException{Message: aws.String("slow down")}}
 		c := &Client{cc: cc}
 
-		if _, err := c.ListResources(context.Background(), TypeLambdaFunction); err == nil {
+		if _, err := c.ListResources(context.Background(), TypeLambdaFunction, nil); err == nil {
 			t.Fatal("expected an error")
+		}
+	})
+
+	t.Run("a ResourceNotFoundException for an unscoped list is still a real error", func(t *testing.T) {
+		// Only ever observed for a scoped (parent-requiring) list in a real
+		// account — see Client.ListResources's own doc comment. An unscoped
+		// list returning it is unexpected and must not be quietly read as
+		// "nothing exists".
+		cc := &fakeCC{listErr: &cctypes.ResourceNotFoundException{Message: aws.String("not found")}}
+		c := &Client{cc: cc}
+
+		ids, err := c.ListResources(context.Background(), TypeLambdaFunction, nil)
+		if err == nil {
+			t.Fatal("expected an error for an unscoped list's ResourceNotFoundException")
+		}
+		if ids != nil {
+			t.Fatalf("ids = %v, want nil alongside the error", ids)
+		}
+	})
+
+	t.Run("a ResourceNotFoundException for a scoped list is absence, not an error", func(t *testing.T) {
+		// Verified against a live account: listing AWS::Lambda::Permission
+		// scoped to a FunctionName that does not exist returns
+		// ResourceNotFoundException, not an empty result — see
+		// Client.ListResources's own doc comment for the real API response
+		// this reproduces. The parent's absence must translate to the
+		// permission's own absence, the same (nil, nil) contract Get
+		// promises everywhere else.
+		cc := &fakeCC{listErr: &cctypes.ResourceNotFoundException{
+			Message: aws.String("AWS::Lambda::Permission Handler returned status FAILED: The resource you requested does not exist."),
+		}}
+		c := &Client{cc: cc}
+
+		ids, err := c.ListResources(context.Background(), realTypeLambdaPermission, map[string]any{"FunctionName": "does-not-exist"})
+		if err != nil {
+			t.Fatalf("ListResources: %v, want nil error for a scoped list's absent parent", err)
+		}
+		if ids != nil {
+			t.Fatalf("ids = %v, want nil", ids)
 		}
 	})
 
@@ -272,7 +332,7 @@ func TestClientListResources(t *testing.T) {
 		}}}
 		c := &Client{cc: cc}
 
-		_, err := c.ListResources(context.Background(), TypeLambdaFunction)
+		_, err := c.ListResources(context.Background(), TypeLambdaFunction, nil)
 		if err == nil {
 			t.Fatal("expected the page walk to be bounded and report an error")
 		}
