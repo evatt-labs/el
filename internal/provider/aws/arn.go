@@ -33,11 +33,35 @@ func ruleARN(region, account, name string) string {
 	return fmt.Sprintf("arn:aws:events:%s:%s:rule/%s", region, account, name)
 }
 
-// executeAPIArn builds an API Gateway HTTP API's execute-api ARN, scoped to
-// every stage/method/resource path via the standard wildcard suffix —
+// executeAPIArn builds an API Gateway HTTP API's execute-api ARN for a
+// Lambda invoke permission, scoped to every stage and route.
+//
 // apiID cannot be derived locally (it is AWS-assigned, not a name kraai
 // chooses), so this always requires whatever live lookup produced it; see
 // lambdapermission.go's apiGatewaySourceARN.
+//
+// # Two wildcards, not three
+//
+// An earlier version emitted "/*/*/*" on the reasoning that the suffix
+// covers stage, method and resource path. That is the REST API (v1) shape.
+// An HTTP API (v2) routing through a $default route invokes with
+// {apiID}/{stage}/{route} — two segments after the api id, not three — so
+// a three-wildcard pattern matches nothing and API Gateway is silently
+// refused permission to invoke.
+//
+// The symptom is deliberately recorded here because it is nearly
+// undiagnosable from the outside: every resource is created, the policy
+// exists and names the right principal, the route and integration are
+// correct, and the function works perfectly on a direct invoke — but every
+// request through the gateway returns a bare 500, and the function's log
+// group shows no invocation at all, because the call never reaches Lambda.
+// Verified against the live account: with "/*/*/*" the endpoint returned
+// 500 and Lambda logged nothing; with "/*/*" the same deployment served
+// 200 immediately.
+//
+// Two wildcards also still cover the REST-style three-segment case for any
+// caller that needs it, since ArnLike's "*" spans "/" — so this is strictly
+// more permissive than the shape it replaces, not a different scope.
 func executeAPIArn(region, account, apiID string) string {
-	return fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*/*/*", region, account, apiID)
+	return fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*/*", region, account, apiID)
 }
