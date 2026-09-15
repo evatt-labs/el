@@ -189,6 +189,110 @@ func TestPlan_ImmutableDiffErrorPlansAsFailed(t *testing.T) {
 	}
 }
 
+// TestPlan_SpecValidatorRunsOnActionCreate is the regression test for the
+// bug SpecValidator exists to fix: a resource that does not exist yet
+// (ActionCreate, Get returns nil) must still be validated. Before decide
+// called ValidateSpec, a bad spec's only validation path was
+// ImmutableDiffer/DiffersFromState, which decide never even type-asserts
+// on this branch — the exact reason a typo'd reservedConcurrency and an
+// invalid httpFrontDoor both planned clean against a real, brand-new
+// kraai-api environment. Also asserts Get was never called: ValidateSpec
+// runs first, so an invalid spec is reported without spending a live call.
+func TestPlan_SpecValidatorRunsOnActionCreate(t *testing.T) {
+	boom := errors.New("bad spec")
+	validator := &fakeValidator{
+		fakeResource: newFakeResource(),
+		validate:     func(resource.Spec) error { return boom },
+	}
+	reg := resource.NewRegistry()
+	must(t, reg.Register(resource.Registration{
+		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: validator,
+	}))
+	m := &manifest.Manifest{
+		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
+		Services: map[string]manifest.Service{
+			"api": {Objects: []manifest.ObjectStore{{Binding: "UPLOADS"}}},
+		},
+	}
+	// Deliberately no state seeded for this resource's derived name: Get
+	// would return (nil, nil), the ActionCreate path, if it ran at all.
+
+	p, err := New(reg).Plan(context.Background(), m, envName)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	got := findAction(t, p, "cloudflare", "r2_bucket")
+	if got.Kind != ActionFailed || !errors.Is(got.Err, boom) {
+		t.Fatalf("action = %+v, want ActionFailed wrapping %v", got, boom)
+	}
+	if validator.getCalls != 0 {
+		t.Fatalf("Get called %d times, want 0: ValidateSpec must run before Get", validator.getCalls)
+	}
+}
+
+// TestPlan_SpecValidatorAlsoRunsWhenResourceExists covers the other half:
+// unconditional means every branch, not just the one that was broken.
+// ValidateSpec fails before Get ever runs, so a resource that does in fact
+// already exist never even reaches ImmutableDiffer.
+func TestPlan_SpecValidatorAlsoRunsWhenResourceExists(t *testing.T) {
+	boom := errors.New("bad spec")
+	validator := &fakeValidatingDiffer{
+		fakeResource: newFakeResource(),
+		validate:     func(resource.Spec) error { return boom },
+		differs:      func(resource.Spec, *resource.State) (bool, error) { return false, nil },
+	}
+	reg := resource.NewRegistry()
+	must(t, reg.Register(resource.Registration{
+		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: validator,
+	}))
+	m := &manifest.Manifest{
+		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
+		Services: map[string]manifest.Service{
+			"api": {Objects: []manifest.ObjectStore{{Binding: "UPLOADS"}}},
+		},
+	}
+	name := naming.ResourceName(envName, "api", "UPLOADS")
+	validator.states[name] = &resource.State{Ref: resource.Ref{Provider: "cloudflare", Type: "r2_bucket", Name: name}}
+
+	p, err := New(reg).Plan(context.Background(), m, envName)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	got := findAction(t, p, "cloudflare", "r2_bucket")
+	if got.Kind != ActionFailed || !errors.Is(got.Err, boom) {
+		t.Fatalf("action = %+v, want ActionFailed wrapping %v", got, boom)
+	}
+	if validator.getCalls != 0 {
+		t.Fatalf("Get called %d times, want 0: ValidateSpec should have failed first, before Get/DiffersFromState ran", validator.getCalls)
+	}
+	if validator.differCalls != 0 {
+		t.Fatalf("DiffersFromState called %d times, want 0", validator.differCalls)
+	}
+}
+
+// fakeValidatingDiffer implements both SpecValidator and ImmutableDiffer,
+// so TestPlan_SpecValidatorAlsoRunsWhenResourceExists can prove
+// ValidateSpec's failure short-circuits decide before DiffersFromState (and
+// even Get, per fakeResource's own getCalls counter) is ever reached, not
+// merely that both happen to agree on the outcome.
+type fakeValidatingDiffer struct {
+	*fakeResource
+	validate    func(spec resource.Spec) error
+	differs     func(spec resource.Spec, state *resource.State) (bool, error)
+	differCalls int32
+}
+
+func (f *fakeValidatingDiffer) ValidateSpec(spec resource.Spec) error {
+	return f.validate(spec)
+}
+
+func (f *fakeValidatingDiffer) DiffersFromState(spec resource.Spec, state *resource.State) (bool, error) {
+	f.differCalls++
+	return f.differs(spec, state)
+}
+
 // TestPlan_GetFailureReportsWithoutAbortingTheRun is the partial-failure
 // design decision under test: one resource's Get fails, every other
 // resource is still planned, and Plan itself returns no error.

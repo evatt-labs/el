@@ -12,6 +12,15 @@
 // unless it first type-asserted back to resource.Resource, which is an
 // obvious, deliberate, greppable act rather than an accidental one.
 //
+// decide also type-asserts the same getter-narrowed value against two
+// optional, non-mutating interfaces this package declares itself —
+// ImmutableDiffer (diff.go) and SpecValidator (validate.go) — each
+// returning only a bool/error pair with no path back to a mutating verb.
+// Neither widens what this package can reach; both exist because a
+// provider's own type is the only place that legitimately knows whether a
+// spec is invalid or a live difference is real, and getter alone cannot
+// express "ask the resource, but only a yes/no question."
+//
 // # Shape
 //
 // Plan is an ordered list of Action, one per resource type a manifest

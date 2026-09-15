@@ -99,3 +99,17 @@ type fakeDiffer struct {
 func (f *fakeDiffer) DiffersFromState(spec resource.Spec, state *resource.State) (bool, error) {
 	return f.differs(spec, state)
 }
+
+// fakeValidator wraps a fakeResource to also implement SpecValidator, so
+// tests can exercise decide's unconditional validation pass — including on
+// the ActionCreate path, which is the exact case that was broken before
+// SpecValidator existed (see validate.go's own doc comment) — without every
+// fakeResource needing an opinion on validity it doesn't have.
+type fakeValidator struct {
+	*fakeResource
+	validate func(spec resource.Spec) error
+}
+
+func (f *fakeValidator) ValidateSpec(spec resource.Spec) error {
+	return f.validate(spec)
+}

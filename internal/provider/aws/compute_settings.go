@@ -157,16 +157,25 @@ func normalizeHTTPFrontDoor(raw string) string {
 // decodeLambdaSettings reads LambdaSettings out of a compute Spec's merged
 // settings map (Spec.Config["settings"]).
 //
-// This is the one place every compute service reaches unconditionally (see
-// DiffersFromState's own doc comment in lambda.go), and the settings map it
-// receives is already the full merge of providers.compute.settings and any
-// per-service override (manifest.MergeSettings, internal/plan's
-// expandCompute) — so it is also the one place that actually holds every
-// key a manifest author could have written for this vendor, DecodeSettings'
-// "region" included. That is why the unknown-key check runs here rather
-// than in DecodeSettings or at registry-assembly time: see
-// validateKnownSettings's own doc comment (settings_validate.go) for the
-// alternatives this rejected.
+// The settings map it receives is already the full merge of
+// providers.compute.settings and any per-service override
+// (manifest.MergeSettings, internal/plan's expandCompute) — so it is also
+// the one decoder that actually holds every key a manifest author could
+// have written for this vendor, DecodeSettings' "region" and
+// lambdaurl.go's "functionUrlAuthType" included. That is why the
+// unknown-key check (validateKnownSettings) runs from here rather than
+// from DecodeSettings or at registry-assembly time.
+//
+// This function alone is called from more than one place —
+// lambdaFunctionResource.translate (Create/Update) and
+// lambdaFunctionResource.ValidateSpec (lambda.go), the latter being what
+// internal/plan's decide reaches unconditionally through plan.SpecValidator
+// for every planned action, including a brand-new environment's very first
+// ActionCreate. See ValidateSpec's own doc comment for why that unconditional
+// reach matters and what it replaced (decodeLambdaSettings used to be
+// reachable only via DiffersFromState, which only ever runs once a resource
+// already exists — the exact gap that let a typo'd reservedConcurrency and
+// an invalid httpFrontDoor both plan clean against a fresh environment).
 //
 // Runtime, Architecture and LayerArn are required: without them there is no
 // deployable function (no interpreter, no instruction set, no adapter to
@@ -252,11 +261,38 @@ func decodeLambdaSettings(settings map[string]any) (LambdaSettings, error) {
 // on httpFrontDoor at all and whose own registrations pass nil settings
 // maps in some call paths — decodeLambdaSettings would refuse those on
 // missing runtime/architecture/layerArn, coupling front-door selection to
-// requirements that have nothing to do with it. An actually-invalid value
-// still cannot select nothing silently: decodeLambdaSettings validates it
-// too, reached unconditionally through AWS::Lambda::Function's own
-// DiffersFromState and Create/Update (see lambda.go), so `kraai plan`
-// surfaces the same error this selector would otherwise swallow.
+// requirements that have nothing to do with it.
+//
+// An actually-invalid value still cannot select nothing silently:
+// decodeLambdaSettings validates it too, and AWS::Lambda::Function's
+// ValidateSpec (lambda.go, implementing plan.SpecValidator) is what
+// internal/plan's decide reaches unconditionally for every planned
+// action — Create, NoChange and Replace alike — so `kraai plan` always
+// surfaces the same error this selector would otherwise swallow, on a
+// fresh environment included.
+//
+// This was previously claimed of DiffersFromState/Create/Update instead,
+// which was false on exactly the path that matters most: DiffersFromState
+// only runs once decide has already found an existing resource via Get,
+// and Create/Update only run under `kraai apply`, never `kraai plan`. A
+// service planned into a brand-new environment with an invalid
+// httpFrontDoor got ActionCreate for AWS::Lambda::Function (DiffersFromState
+// never reached) while SelectedBy silently matched neither
+// AWS::ApiGatewayV2::Api nor AWS::Lambda::Url for the exact same reason
+// this comment describes below — the plan came out two resources short
+// with nothing in the output saying why. ValidateSpec closes that gap:
+// see plan.SpecValidator's own doc comment for the general fix and the
+// real `kraai plan` evidence this bug produced.
+//
+// SelectedBy itself still has no error channel (Registration.SelectedBy's
+// own doc comment) and still cannot report "you asked for a front door
+// that does not exist" on its own — an invalid value still makes both
+// AWS::ApiGatewayV2::Api and AWS::Lambda::Url's SelectedBy return false,
+// so neither is ever planned as its own Action, with or without this fix.
+// What changed is that this is no longer silent: AWS::Lambda::Function's
+// own ActionFailed, reachable on every path now, is the loud signal this
+// selector was always designed to depend on instead of reporting the
+// problem itself.
 func httpFrontDoorIs(want string) func(settings map[string]any) bool {
 	return func(settings map[string]any) bool {
 		return normalizeHTTPFrontDoor(settingStr(settings, "httpFrontDoor")) == want

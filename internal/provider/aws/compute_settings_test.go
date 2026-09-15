@@ -277,6 +277,22 @@ func TestDecodeLambdaSettingsRegionDoesNotTripTheUnknownKeyCheck(t *testing.T) {
 	}
 }
 
+// TestDecodeLambdaSettingsFunctionURLAuthTypeDoesNotTripTheUnknownKeyCheck
+// covers the third real reader of the same settings map:
+// lambdaurl.go's translate reads "functionUrlAuthType" directly, never
+// through decodeLambdaSettings, but the merged settings map reaching
+// decodeLambdaSettings (via manifest.MergeSettings) carries it too. Found
+// while building the unknown-key check itself — a real, working setting
+// this check would otherwise have rejected the first time a manifest used
+// it.
+func TestDecodeLambdaSettingsFunctionURLAuthTypeDoesNotTripTheUnknownKeyCheck(t *testing.T) {
+	settings := baseSettingsForConcurrency()
+	settings["functionUrlAuthType"] = "NONE"
+	if _, err := decodeLambdaSettings(settings); err != nil {
+		t.Fatalf("decodeLambdaSettings: %v (functionUrlAuthType should be a known key, not just a lambdaurl.go one)", err)
+	}
+}
+
 func TestValidateKnownSettingsListsEveryOffendingKey(t *testing.T) {
 	err := validateKnownSettings(map[string]any{
 		"runtime": "python3.13", "bogusOne": 1, "bogusTwo": 2,

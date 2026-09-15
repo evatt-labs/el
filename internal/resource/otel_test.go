@@ -282,9 +282,10 @@ func TestInstrumentSurvivesAFailingMeter(t *testing.T) {
 // rather than pass silently against a stub that was never reached.
 type optionalResource struct {
 	Resource
-	secrets map[string]Secret
-	differs bool
-	diffErr error
+	secrets     map[string]Secret
+	differs     bool
+	diffErr     error
+	validateErr error
 }
 
 func (o optionalResource) Secrets(*State) map[string]Secret { return o.secrets }
@@ -292,6 +293,8 @@ func (o optionalResource) Secrets(*State) map[string]Secret { return o.secrets }
 func (o optionalResource) DiffersFromState(Spec, *State) (bool, error) {
 	return o.differs, o.diffErr
 }
+
+func (o optionalResource) ValidateSpec(Spec) error { return o.validateErr }
 
 // plainResource implements only the four required verbs.
 type plainResource struct{ Resource }
@@ -332,6 +335,11 @@ func TestInstrumentedForwardsOptionalInterfaces(t *testing.T) {
 	}); !ok {
 		t.Error("decorated resource does not satisfy ImmutableDiffer; add a forwarder in otel.go")
 	}
+	if _, ok := decorated.(interface {
+		ValidateSpec(Spec) error
+	}); !ok {
+		t.Error("decorated resource does not satisfy SpecValidator; add a forwarder in otel.go")
+	}
 }
 
 // TestInstrumentedForwardsToInner proves the forwarders actually reach the
@@ -342,7 +350,8 @@ func TestInstrumentedForwardsToInner(t *testing.T) {
 	want := map[string]Secret{"connection_uri": func(context.Context) (string, error) {
 		return "postgres://example", nil
 	}}
-	inner := optionalResource{secrets: want, differs: true}
+	boom := errors.New("bad spec")
+	inner := optionalResource{secrets: want, differs: true, validateErr: boom}
 	decorated := decorate(t, inner)
 
 	got := decorated.(SecretProducer).Secrets(&State{})
@@ -361,6 +370,12 @@ func TestInstrumentedForwardsToInner(t *testing.T) {
 	}
 	if !differs {
 		t.Error("DiffersFromState() = false, want the inner resource's true")
+	}
+
+	if err := decorated.(interface {
+		ValidateSpec(Spec) error
+	}).ValidateSpec(Spec{}); !errors.Is(err, boom) {
+		t.Errorf("ValidateSpec() error = %v, want the inner resource's %v", err, boom)
 	}
 }
 
@@ -384,5 +399,11 @@ func TestInstrumentedOptionalsOnPlainResource(t *testing.T) {
 	}
 	if differs {
 		t.Error("DiffersFromState() on a non-differ = true, want false")
+	}
+
+	if err := decorated.(interface {
+		ValidateSpec(Spec) error
+	}).ValidateSpec(Spec{}); err != nil {
+		t.Errorf("ValidateSpec() on a non-validator error = %v, want nil", err)
 	}
 }

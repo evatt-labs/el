@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -250,6 +251,55 @@ func TestLambdaFunctionCreateRequiresDirAndHandler(t *testing.T) {
 	if _, err := fn.Create(context.Background(), noHandler); err == nil {
 		t.Fatal("expected an error for a missing handler")
 	}
+}
+
+// TestLambdaFunctionValidateSpec covers plan.SpecValidator's actual
+// implementation: ValidateSpec must reject what decodeLambdaSettings
+// rejects, with no state, no ref, and no I/O (fakeClient/fakeSTS are never
+// touched — proven by newLambdaFunctionResourceForTest using fakes that
+// would record any call made to them, none of which this test asserts on
+// because none are made).
+func TestLambdaFunctionValidateSpec(t *testing.T) {
+	fn := newLambdaFunctionResourceForTest(&fakeClient{}, &fakeS3{}, &fakeSTS{})
+
+	t.Run("a valid spec passes", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+			},
+		}}
+		if err := fn.ValidateSpec(spec); err != nil {
+			t.Fatalf("ValidateSpec: %v", err)
+		}
+	})
+
+	t.Run("a typo'd key is rejected, naming it", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+				"reservdConcurrency": 5,
+			},
+		}}
+		err := fn.ValidateSpec(spec)
+		if err == nil {
+			t.Fatal("expected a validation error")
+		}
+		if !strings.Contains(err.Error(), "reservdConcurrency") {
+			t.Fatalf("error %q does not name the offending key", err.Error())
+		}
+	})
+
+	t.Run("an invalid httpFrontDoor is rejected", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+				"httpFrontDoor": "totally-bogus-value",
+			},
+		}}
+		if err := fn.ValidateSpec(spec); err == nil {
+			t.Fatal("expected a validation error for an invalid httpFrontDoor")
+		}
+	})
 }
 
 func TestLambdaFunctionDiffersFromStateChecksOnlyFunctionName(t *testing.T) {

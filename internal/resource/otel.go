@@ -167,6 +167,13 @@ func (i *instrumented) Delete(ctx context.Context, ref Ref) error {
 // or it will be silently dropped in production exactly as these two were.
 // That test can prove the interfaces it knows about are forwarded; nothing
 // mechanical can notice an interface nobody told it about.
+//
+// A third optional interface, plan.SpecValidator, joined these two for
+// exactly the reason this HAZARD note warns about: it is declared in
+// internal/plan, spelled out structurally below for the same import-cycle
+// reason DiffersFromState already is, and forwarded here so a validator a
+// provider implements is not silently dropped the moment internal/assemble
+// wraps it in Instrument, which every real run does.
 
 // Secrets forwards to the inner resource when it is a SecretProducer, and
 // otherwise reports that this resource produces no credentials — the same
@@ -195,4 +202,22 @@ func (i *instrumented) DiffersFromState(spec Spec, state *State) (bool, error) {
 		return false, nil
 	}
 	return differ.DiffersFromState(spec, state)
+}
+
+// ValidateSpec forwards to the inner resource when it can validate, and
+// otherwise reports no error — the same answer a caller gets from a type
+// that does not implement the interface.
+//
+// The interface is spelled out structurally rather than imported, for the
+// same import-cycle reason DiffersFromState's own doc comment gives:
+// plan.SpecValidator is declared in internal/plan, which imports this
+// package.
+func (i *instrumented) ValidateSpec(spec Spec) error {
+	validator, ok := i.inner.(interface {
+		ValidateSpec(Spec) error
+	})
+	if !ok {
+		return nil
+	}
+	return validator.ValidateSpec(spec)
 }
