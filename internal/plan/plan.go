@@ -56,6 +56,28 @@ type Item struct {
 	Type     string
 	// Phase is when this resource type is provisioned (D31).
 	Phase resource.Phase
+	// ReadsBindings names the bindings in this action's own service whose
+	// credentials it may read.
+	//
+	// A compute item's binding is the service itself (see expandCompute), so
+	// without this field apply had no way to hand a Lambda the connection
+	// string for the database its own service declares: apply's secret
+	// index is keyed by (ServiceKey, Binding), a compute action's Binding is
+	// svcKey, and a database binding's producer registers itself under
+	// (ServiceKey, "DB") — the keys never meet. expandCompute populates this
+	// with every binding the service declares across Databases, KeyValue,
+	// Objects and Queues, sorted for the same determinism the rest of this
+	// package guarantees; expandBinding populates it with the item's own
+	// binding alone, which is a no-op change in what that item can read.
+	//
+	// This lives on Item rather than being inferred inside apply from the
+	// manifest because apply must not import internal/manifest or branch on
+	// capability — the planner is the one package that already walks a
+	// service's declared bindings, so it is the one place that can express
+	// "what may this action read" as plain data instead of apply
+	// re-deriving manifest-shaped knowledge it was deliberately never given
+	// (see internal/apply's package doc).
+	ReadsBindings []string
 }
 
 // Action is one resource type's planned outcome.

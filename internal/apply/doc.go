@@ -83,6 +83,65 @@
 // this run or a previous one — which the manifest gives no reason to care
 // about.
 //
+// # A compute resource reads its own service's credentials
+//
+// Every non-compute item is expanded from exactly one binding, so scoping
+// its secrets to that one binding (above) was always correct for it. A
+// compute item is different: internal/plan/planner.go's expandCompute sets
+// Item.Binding to the service key itself, not to any one of the bindings
+// the service declares, because a service's compute resource is not "part
+// of" any single database/keyvalue/objects/queues binding — it is the
+// deployable unit all of them exist to serve. Scoping secrets to
+// (ServiceKey, Binding) alone therefore left a service's own compute
+// resource unable to ever read the credentials its own bindings produce: a
+// Neon branch registers connection_uri under (api, DB), but the api
+// service's Lambda's own item carries Binding "api", and (api, api) is a
+// key nothing ever populates.
+//
+// plan.Item.ReadsBindings closes this gap as plain data the planner
+// computes and apply merely consults — apply still does not know what
+// "compute" or a manifest capability is, and does not import
+// internal/manifest to find out. For each action, execute unions
+// secretIndex.forAction across every binding named in
+// effectiveReadsBindings(act) rather than looking up a single bindingKey:
+//
+//   - Secrets from the action's own binding (act.Binding) keep their bare
+//     names — this is the path every existing resource type already relies
+//     on (a Hyperdrive configuration asking Spec.Secret(ctx,
+//     "connection_uri") for its own branch), and it is unchanged by this:
+//     an item whose ReadsBindings is exactly its own Binding — every
+//     non-compute item, per expandBinding — produces exactly the same map
+//     the old, single-bindingKey lookup used to.
+//   - Secrets from any other binding in ReadsBindings appear namespaced as
+//     "<binding>.<name>" — a Lambda for service "api" that also declares a
+//     KeyValue binding "CACHE" sees the branch's credential as
+//     "DB.connection_uri" and the cache's as "CACHE.<name>", never both as
+//     bare "connection_uri" colliding with each other or with its own
+//     binding's secrets (compute has none of its own today, but the rule
+//     holds regardless).
+//
+// This namespacing is collision-free by construction: at most one binding
+// — the action's own — may ever claim a bare name, so two different
+// bindings producing a same-named secret land at two different keys no
+// matter what either name is.
+//
+// # Known gap: sibling attributes, not just secrets
+//
+// resource.State.Attributes carries non-secret values a later phase may
+// need — a bucket name, a namespace id — and resource.Outputs already
+// stores them, keyed by Ref. But resource.Spec has no equivalent to
+// Secrets for attributes, so nothing analogous to this file's secret
+// handoff exists for them: a compute resource that wants a sibling
+// binding's bucket name, not its credential, has no contract-level way to
+// receive it. Today that resource has to derive the sibling's name itself
+// through internal/naming from the same (environment, service, binding)
+// inputs the planner already used to name it — which works because naming
+// is deterministic, but is a workaround, not a designed seam. Building a
+// namespaced Spec.Attributes alongside Spec.Secrets, populated from
+// resource.Outputs the same way secretIndex is populated from
+// SecretProducer, is the natural next step whenever a resource actually
+// needs it.
+//
 // # Replace is delete-then-create, never Update
 //
 // Every registered resource.Resource returns resource.ErrImmutable from
