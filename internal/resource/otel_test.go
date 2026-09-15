@@ -274,3 +274,115 @@ func TestInstrumentSurvivesAFailingMeter(t *testing.T) {
 		t.Fatal("a failing meter also suppressed tracing")
 	}
 }
+
+// optionalResource implements both optional interfaces, with values a test
+// can distinguish from the decorator's own not-implemented answers. The
+// embedded Resource is left nil deliberately: these tests exercise only the
+// optional methods, so any call to a required verb should panic loudly
+// rather than pass silently against a stub that was never reached.
+type optionalResource struct {
+	Resource
+	secrets map[string]Secret
+	differs bool
+	diffErr error
+}
+
+func (o optionalResource) Secrets(*State) map[string]Secret { return o.secrets }
+
+func (o optionalResource) DiffersFromState(Spec, *State) (bool, error) {
+	return o.differs, o.diffErr
+}
+
+// plainResource implements only the four required verbs.
+type plainResource struct{ Resource }
+
+// decorate wraps r the way internal/assemble does in production.
+func decorate(t *testing.T, r Resource) Resource {
+	t.Helper()
+	reg := NewRegistry(WithDecorator(Instrument(nil, nil)))
+	if err := reg.Register(Registration{
+		Provider: "p", Type: "t", Capability: "objects",
+		Phase: PhaseStorage, Lookup: LookupByName, Resource: r,
+	}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+	got, ok := reg.Lookup("p/t")
+	if !ok {
+		t.Fatal("registration vanished from the registry")
+	}
+	return got.Resource
+}
+
+// TestInstrumentedForwardsOptionalInterfaces is the guard described in
+// otel.go's HAZARD note. It asserts that a decorated resource still
+// satisfies every optional interface this package defines — the property
+// that was silently false in production and that no other test covered,
+// because every other test uses undecorated fakes.
+//
+// Adding an optional interface to this package means adding a forwarder in
+// otel.go and a case here. This test cannot discover one on its own.
+func TestInstrumentedForwardsOptionalInterfaces(t *testing.T) {
+	decorated := decorate(t, optionalResource{})
+
+	if _, ok := decorated.(SecretProducer); !ok {
+		t.Error("decorated resource does not satisfy SecretProducer; add a forwarder in otel.go")
+	}
+	if _, ok := decorated.(interface {
+		DiffersFromState(Spec, *State) (bool, error)
+	}); !ok {
+		t.Error("decorated resource does not satisfy ImmutableDiffer; add a forwarder in otel.go")
+	}
+}
+
+// TestInstrumentedForwardsToInner proves the forwarders actually reach the
+// wrapped resource rather than merely satisfying the interface — a
+// forwarder that always returned the not-implemented answer would pass the
+// guard test above while leaving both behaviours just as dead.
+func TestInstrumentedForwardsToInner(t *testing.T) {
+	want := map[string]Secret{"connection_uri": func(context.Context) (string, error) {
+		return "postgres://example", nil
+	}}
+	inner := optionalResource{secrets: want, differs: true}
+	decorated := decorate(t, inner)
+
+	got := decorated.(SecretProducer).Secrets(&State{})
+	if len(got) != 1 {
+		t.Fatalf("Secrets() returned %d producers, want 1", len(got))
+	}
+	if _, ok := got["connection_uri"]; !ok {
+		t.Errorf("Secrets() lost the producer's key: got %v", got)
+	}
+
+	differs, err := decorated.(interface {
+		DiffersFromState(Spec, *State) (bool, error)
+	}).DiffersFromState(Spec{}, &State{})
+	if err != nil {
+		t.Fatalf("DiffersFromState() error = %v", err)
+	}
+	if !differs {
+		t.Error("DiffersFromState() = false, want the inner resource's true")
+	}
+}
+
+// TestInstrumentedOptionalsOnPlainResource covers the other half of the
+// unconditional-forwarding tradeoff: a resource implementing neither
+// optional interface must still get answers indistinguishable from not
+// implementing them, or the decorator would invent behaviour the wrapped
+// type never had.
+func TestInstrumentedOptionalsOnPlainResource(t *testing.T) {
+	decorated := decorate(t, plainResource{})
+
+	if got := decorated.(SecretProducer).Secrets(&State{}); got != nil {
+		t.Errorf("Secrets() on a non-producer = %v, want nil", got)
+	}
+
+	differs, err := decorated.(interface {
+		DiffersFromState(Spec, *State) (bool, error)
+	}).DiffersFromState(Spec{}, &State{})
+	if err != nil {
+		t.Errorf("DiffersFromState() on a non-differ error = %v, want nil", err)
+	}
+	if differs {
+		t.Error("DiffersFromState() on a non-differ = true, want false")
+	}
+}
