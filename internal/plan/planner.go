@@ -252,6 +252,8 @@ func (p *Planner) expandCompute(
 		config["schedule"] = schedule
 	}
 
+	reads := declaredBindings(svc)
+
 	out := make([]plannedItem, 0, len(regs))
 	for _, r := range regs {
 		if !r.AppliesToTrigger(trigger) {
@@ -261,6 +263,7 @@ func (p *Planner) expandCompute(
 			Item: Item{
 				ServiceKey: svcKey, Binding: svcKey, Capability: manifest.CapabilityCompute,
 				Provider: r.Provider, Type: r.Type, Phase: r.Phase,
+				ReadsBindings: reads,
 			},
 			ref:  resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
 			spec: resource.Spec{Binding: svcKey, Name: name, Config: config},
@@ -268,6 +271,37 @@ func (p *Planner) expandCompute(
 		})
 	}
 	return out, nil
+}
+
+// declaredBindings returns every binding svc declares across Databases,
+// KeyValue, Objects and Queues, sorted ascending.
+//
+// This is the set a compute item's ReadsBindings gets: a service's own
+// compute resource is the natural — and only sensible default — reader of
+// every credential its own bindings produce, since nothing else in the
+// manifest can name a narrower "this Lambda gets the DB secret but not the
+// cache secret" scope today. Sorted for the same reason expand walks
+// m.Services in sorted order: Go gives no ordering guarantee over the
+// slices' construction order here either (each is appended in manifest
+// declaration order, which is stable, but sorting removes any doubt and
+// keeps a repeated Plan call byte-for-byte identical regardless of
+// manifest authoring order).
+func declaredBindings(svc manifest.Service) []string {
+	var bindings []string
+	for _, d := range svc.Databases {
+		bindings = append(bindings, d.Binding)
+	}
+	for _, kv := range svc.KeyValue {
+		bindings = append(bindings, kv.Binding)
+	}
+	for _, o := range svc.Objects {
+		bindings = append(bindings, o.Binding)
+	}
+	for _, q := range svc.Queues {
+		bindings = append(bindings, q.Binding)
+	}
+	sort.Strings(bindings)
+	return bindings
 }
 
 // annotate names the manifest path a binding-expansion failure came from,
@@ -304,6 +338,14 @@ func (p *Planner) expandBinding(
 			Item: Item{
 				ServiceKey: svcKey, Binding: binding, Capability: capability,
 				Provider: r.Provider, Type: r.Type, Phase: r.Phase,
+				// A non-compute item reads only the binding it was itself
+				// expanded from — identical to Binding above, so this is a
+				// no-op change to what today's behaviour already was. Set
+				// explicitly rather than left nil so this item's
+				// ReadsBindings never emerges from apply's nil-fallback by
+				// accident; it is this package's decision to make, not
+				// apply's to infer.
+				ReadsBindings: []string{binding},
 			},
 			ref:  resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
 			spec: resource.Spec{Binding: binding, Name: name, Config: config},

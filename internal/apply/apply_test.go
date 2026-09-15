@@ -27,7 +27,12 @@ func newRegistry(t *testing.T, regs ...resource.Registration) *resource.Registry
 }
 
 // action builds one plan.Action with the given identity, phase, and kind,
-// filling in the fields apply actually reads.
+// filling in the fields apply actually reads. ReadsBindings is left nil —
+// every existing test in this file exercises apply's fallback-to-own-
+// binding path (effectiveReadsBindings in apply.go), which is also exactly
+// what internal/plan/planner.go's expandBinding sets explicitly for every
+// non-compute item today. See actionReading for tests that need a
+// different ReadsBindings, e.g. a compute item reading a sibling binding.
 func action(serviceKey, binding, provider, typ string, phase resource.Phase, kind plan.ActionKind) plan.Action {
 	name := serviceKey + "-" + binding
 	return plan.Action{
@@ -39,6 +44,17 @@ func action(serviceKey, binding, provider, typ string, phase resource.Phase, kin
 		Spec: resource.Spec{Binding: binding, Name: name},
 		Kind: kind,
 	}
+}
+
+// actionReading builds a plan.Action like action, but with an explicit
+// ReadsBindings — the shape internal/plan/planner.go's expandCompute
+// produces for a compute item, whose own Binding is the service key and
+// whose ReadsBindings names the (possibly many) bindings the service
+// declares.
+func actionReading(serviceKey, binding, provider, typ string, phase resource.Phase, kind plan.ActionKind, reads []string) plan.Action {
+	a := action(serviceKey, binding, provider, typ, phase, kind)
+	a.ReadsBindings = reads
+	return a
 }
 
 func requireCode(t *testing.T, err error, code kerrors.Code) {
@@ -496,6 +512,185 @@ func TestApply_NoChangeWithNilCurrentIsInvalidPlan(t *testing.T) {
 	r := findResult(t, result, "api-DB")
 	if r.Outcome != OutcomeFailed || r.Err == nil {
 		t.Fatalf("result = %+v, want OutcomeFailed with an error", r)
+	}
+}
+
+// --- cross-binding secrets (ReadsBindings) ---
+
+// TestApply_ComputeReadsSiblingBindingSecret_Namespaced is the gap this
+// workstream fixes: a compute item's own Binding is the service key (see
+// internal/plan/planner.go's expandCompute), not any one of the bindings it
+// reads — so without ReadsBindings, a Lambda for service "api" could never
+// see the connection_uri its own "DB" binding produced. With ReadsBindings
+// set to ["DB"], it must see it namespaced as "DB.connection_uri" — never
+// bare, since "DB" is not this action's own binding.
+func TestApply_ComputeReadsSiblingBindingSecret_Namespaced(t *testing.T) {
+	branch := newFakeResource()
+	branch.createState = &resource.State{Ref: resource.Ref{Provider: "neon", Type: "branch", Name: "api-DB"}}
+	branchWithSecrets := &fakeSecretResource{
+		fakeResource: branch,
+		secretsFn: func(*resource.State) map[string]resource.Secret {
+			return map[string]resource.Secret{
+				"connection_uri": func(context.Context) (string, error) { return "postgres://secret", nil },
+			}
+		},
+	}
+
+	lambda := newFakeResource()
+	lambda.createState = &resource.State{Ref: resource.Ref{Provider: "aws", Type: "function", Name: "api"}}
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "neon", Type: "branch", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: branchWithSecrets},
+		resource.Registration{Provider: "aws", Type: "function", Capability: "compute",
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: lambda},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate),
+		actionReading("api", "api", "aws", "function", resource.PhaseCompute, plan.ActionCreate, []string{"DB"}),
+	}}
+
+	if _, err := New(reg).Apply(context.Background(), p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	secrets := lambda.LastSpec().Secrets
+	if _, bare := secrets["connection_uri"]; bare {
+		t.Errorf("lambda's spec carried a bare %q secret, want it namespaced: %+v", "connection_uri", secrets)
+	}
+	secret, ok := secrets["DB.connection_uri"]
+	if !ok {
+		t.Fatalf("lambda's spec carried no DB.connection_uri secret: %+v", secrets)
+	}
+	value, err := secret(context.Background())
+	if err != nil || value != "postgres://secret" {
+		t.Fatalf("secret() = %q, %v, want \"postgres://secret\", nil", value, err)
+	}
+}
+
+// TestApply_TwoReadableBindingsSameSecretName_NoCollision proves the
+// namespacing rule is collision-free by construction: a compute item
+// reading two sibling bindings that each produce a secret named
+// "connection_uri" must see both, distinguished by binding prefix, never
+// one silently overwriting the other in the merged map.
+func TestApply_TwoReadableBindingsSameSecretName_NoCollision(t *testing.T) {
+	newBranch := func(uri string) resource.Resource {
+		f := newFakeResource()
+		f.createState = &resource.State{Ref: resource.Ref{Provider: "neon", Type: "branch"}}
+		return &fakeSecretResource{
+			fakeResource: f,
+			secretsFn: func(*resource.State) map[string]resource.Secret {
+				return map[string]resource.Secret{
+					"connection_uri": func(context.Context) (string, error) { return uri, nil },
+				}
+			},
+		}
+	}
+	primary := newBranch("postgres://primary")
+	replica := newBranch("postgres://replica")
+
+	lambda := newFakeResource()
+	lambda.createState = &resource.State{Ref: resource.Ref{Provider: "aws", Type: "function", Name: "api"}}
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "neon", Type: "branch", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: primary},
+		resource.Registration{Provider: "neon", Type: "branch2", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: replica},
+		resource.Registration{Provider: "aws", Type: "function", Capability: "compute",
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: lambda},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "PRIMARY", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate),
+		action("api", "REPLICA", "neon", "branch2", resource.PhaseDatabase, plan.ActionCreate),
+		actionReading("api", "api", "aws", "function", resource.PhaseCompute, plan.ActionCreate,
+			[]string{"PRIMARY", "REPLICA"}),
+	}}
+
+	if _, err := New(reg).Apply(context.Background(), p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	secrets := lambda.LastSpec().Secrets
+	if len(secrets) != 2 {
+		t.Fatalf("secrets = %+v, want exactly 2 entries, not a collision-overwritten 1", secrets)
+	}
+	primaryURI, err := secrets["PRIMARY.connection_uri"](context.Background())
+	if err != nil || primaryURI != "postgres://primary" {
+		t.Errorf("PRIMARY.connection_uri = %q, %v, want \"postgres://primary\", nil", primaryURI, err)
+	}
+	replicaURI, err := secrets["REPLICA.connection_uri"](context.Background())
+	if err != nil || replicaURI != "postgres://replica" {
+		t.Errorf("REPLICA.connection_uri = %q, %v, want \"postgres://replica\", nil", replicaURI, err)
+	}
+}
+
+// TestApply_NonComputeActionExplicitReadsBindings_OwnBindingOnly mirrors
+// TestApply_SecretsDoNotLeakAcrossBindings but with ReadsBindings set
+// explicitly to the item's own binding — the exact value
+// internal/plan/planner.go's expandBinding now writes for every non-compute
+// item — rather than relying on the nil-fallback path. A sibling binding's
+// secret must still not leak in.
+func TestApply_NonComputeActionExplicitReadsBindings_OwnBindingOnly(t *testing.T) {
+	branch := newFakeResource()
+	branch.createState = &resource.State{Ref: resource.Ref{Provider: "neon", Type: "branch", Name: "api-DB"}}
+	branchWithSecrets := &fakeSecretResource{
+		fakeResource: branch,
+		secretsFn: func(*resource.State) map[string]resource.Secret {
+			return map[string]resource.Secret{
+				"connection_uri": func(context.Context) (string, error) { return "postgres://secret", nil },
+			}
+		},
+	}
+
+	otherHyperdrive := newFakeResource()
+	otherHyperdrive.createState = &resource.State{Ref: resource.Ref{Provider: "cf", Type: "hyperdrive", Name: "api-OTHER"}}
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "neon", Type: "branch", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: branchWithSecrets},
+		resource.Registration{Provider: "cf", Type: "hyperdrive", Capability: "database",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: otherHyperdrive},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate),
+		actionReading("api", "OTHER", "cf", "hyperdrive", resource.PhaseStorage, plan.ActionCreate, []string{"OTHER"}),
+	}}
+
+	if _, err := New(reg).Apply(context.Background(), p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if len(otherHyperdrive.LastSpec().Secrets) != 0 {
+		t.Fatalf("otherHyperdrive's spec carried secrets = %+v, want none: an explicit own-binding-only "+
+			"ReadsBindings must not see a sibling binding's secret", otherHyperdrive.LastSpec().Secrets)
+	}
+}
+
+// TestEffectiveReadsBindings_FallsBackToOwnBinding is the unit-level pin
+// for the defensive fallback apply.go's execute relies on: a plan.Action
+// whose ReadsBindings is nil or empty must resolve to exactly its own
+// Binding, matching what every action saw before this field existed,
+// rather than emerging as "reads nothing" by accident.
+func TestEffectiveReadsBindings_FallsBackToOwnBinding(t *testing.T) {
+	nilCase := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate)
+	if got := effectiveReadsBindings(nilCase); len(got) != 1 || got[0] != "DB" {
+		t.Errorf("nil ReadsBindings: effectiveReadsBindings = %v, want [DB]", got)
+	}
+
+	emptyCase := actionReading("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate, []string{})
+	if got := effectiveReadsBindings(emptyCase); len(got) != 1 || got[0] != "DB" {
+		t.Errorf("empty ReadsBindings: effectiveReadsBindings = %v, want [DB]", got)
+	}
+
+	explicitCase := actionReading("api", "api", "aws", "function", resource.PhaseCompute, plan.ActionCreate,
+		[]string{"CACHE", "DB"})
+	got := effectiveReadsBindings(explicitCase)
+	if len(got) != 2 || got[0] != "CACHE" || got[1] != "DB" {
+		t.Errorf("explicit ReadsBindings: effectiveReadsBindings = %v, want [CACHE DB] unchanged", got)
 	}
 }
 
