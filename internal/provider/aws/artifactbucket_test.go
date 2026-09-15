@@ -57,15 +57,32 @@ func TestArtifactBucketResourceRewritesNameBothWays(t *testing.T) {
 	})
 
 	t.Run("Create submits the real bucket name and reports the service Ref", func(t *testing.T) {
-		state, err := bucket.Create(context.Background(), resource.Spec{Name: serviceName})
+		// The incoming spec carries expandCompute's generic compute shape
+		// (dir/settings/trigger/handler/schedule) — none of it is a real
+		// AWS::S3::Bucket property, and Create must never forward it
+		// verbatim (see this method's own doc comment on why an absent
+		// BucketName silently multiplies buckets every apply).
+		spec := resource.Spec{
+			Name: serviceName,
+			Config: map[string]any{
+				"dir": "./app", "trigger": "http", "handler": "run.sh",
+				"settings": map[string]any{"runtime": "python3.13"},
+			},
+		}
+		state, err := bucket.Create(context.Background(), spec)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if state.Ref.Name != serviceName {
 			t.Fatalf("state.Ref.Name = %q, want %q", state.Ref.Name, serviceName)
 		}
-		if fc.createCalls[0]["BucketName"] != nil {
-			t.Fatalf("unexpected BucketName in desired state: %+v", fc.createCalls[0])
+
+		desired := fc.createCalls[0]
+		if desired["BucketName"] != realBucket {
+			t.Fatalf("BucketName = %v, want %q", desired["BucketName"], realBucket)
+		}
+		if len(desired) != 1 {
+			t.Fatalf("desired state = %+v, want exactly {BucketName}: no generic compute keys leaked through", desired)
 		}
 	})
 

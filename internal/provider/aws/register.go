@@ -304,11 +304,14 @@ func Registrations(client *Client) []resource.Registration {
 			// uniqueness constraint on it. See apigatewayv2Match's doc
 			// comment for the full reasoning; this is a byTag type for the
 			// same reason ACM::Certificate is under D26.
-			Lookup: resource.LookupByTag,
-			Resource: &resourceType{
-				provider: Provider, typeName: TypeAPIGatewayV2API,
-				lookup: resource.LookupByTag, client: client, match: apigatewayv2Match, stampTag: apigatewayv2StampTag,
-			},
+			//
+			// Resource is newAPIGatewayResource, not a plain resourceType:
+			// this is where the API's real properties (Name, ProtocolType,
+			// the Target quick-create Lambda integration) actually get
+			// built — see apigatewayv2.go's own doc comment for why the
+			// bare generic engine could not create this type at all.
+			Lookup:   resource.LookupByTag,
+			Resource: newAPIGatewayResource(client),
 		},
 		{
 			Provider: Provider, Type: TypePermissionAPIGateway,

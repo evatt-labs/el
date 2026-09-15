@@ -122,8 +122,24 @@ func (a *artifactBucketResource) Get(ctx context.Context, ref resource.Ref) (*re
 }
 
 func (a *artifactBucketResource) Create(ctx context.Context, spec resource.Spec) (*resource.State, error) {
+	realName := artifactBucketName(spec.Name)
+
 	realSpec := spec
-	realSpec.Name = artifactBucketName(spec.Name)
+	realSpec.Name = realName
+	// Config must be replaced, not merely carried through: spec.Config on
+	// entry is expandCompute's generic compute shape (dir, settings,
+	// trigger, handler, schedule), none of which is BucketName — the
+	// property this bare byName type's own primary identifier (D26) is
+	// actually built from. Submitting the generic shape unchanged would
+	// hand Cloud Control a desired state with no BucketName at all; S3
+	// treats an absent bucket name as "generate one," so every apply would
+	// create a new, differently-named bucket that Get (which looks up
+	// realName specifically) can never find again — the exact
+	// self-inflicted, permanent duplication PR #80's third review pass
+	// named as the risk this whole package's registrations needed
+	// auditing for.
+	realSpec.Config = map[string]any{"BucketName": realName}
+
 	state, err := a.inner.Create(ctx, realSpec)
 	if err != nil || state == nil {
 		return state, err

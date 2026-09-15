@@ -499,6 +499,36 @@ workstreams:
         service gets exactly one, never both (added during review, fixing
         the same wrong-output bug class `per-service-compute` (#78)
         eliminated for trigger gating).
+      - >-
+        `AWS::ApiGatewayV2::Api` (registered in `aws-provider-core`, before
+        this workstream) gained a real translate step, the same shape
+        every other Tier 2 type here already has: the bare generic engine
+        was submitting `expandCompute`'s generic compute config as this
+        type's Cloud Control properties, none of which are real properties
+        of `AWS::ApiGatewayV2::Api` — every create would have been
+        rejected. Fixed via the `Target` quick-create property (verified
+        against the live CloudFormation reference), which also wires the
+        Lambda integration/route/stage in one property — no separate
+        Integration/Route/Stage registrations needed. Found and fixed
+        during review, since this workstream's `httpFrontDoor` default
+        put API Gateway on the critical path for every unconfigured HTTP
+        service.
+      - >-
+        Review also surfaced and fixed the identical class of bug in this
+        workstream's own artifact-bucket wrapper (Create was never setting
+        `BucketName`, so every apply would have created a fresh,
+        differently-named bucket instead of finding the one from the last
+        apply) and audited every other registration in the package for the
+        same pattern. The five pre-existing `objects`-capability types
+        (`AWS::S3::Bucket`, `AWS::Route53::HostedZone`,
+        `AWS::CertificateManager::Certificate`,
+        `AWS::CloudFront::Distribution`, `AWS::Route53::RecordSet`, all
+        from `aws-provider-core`) have the same root cause —
+        `expandBinding` passes a nil `Spec.Config` for the `objects`
+        capability, so their bare `resourceType.Create` submits an empty
+        desired state — but were left unfixed here as out of this
+        workstream's scope; see the PR body for the full audit and the
+        follow-up this implies for `aws-provider-core`.
     blocked_on: >-
       Resolved: compute targets AWS Lambda (this workstream), so kraai.dev
       does have a hosted-API shape as of this PR. Whether kraai.dev ships
