@@ -1,0 +1,21 @@
+services:
+  api:
+    dir: .
+    compute:
+      trigger: http
+      handler: app.main.handler
+      settings:
+        layers: [web-adapter]
+    databases:
+      - { binding: DB, driver: postgres }
+
+  tick:
+    dir: .
+    compute:
+      trigger: schedule
+      handler: app.tasks.tick.handler
+      schedule: "rate(5 minutes)"
+      settings:
+        reservedConcurrency: 1
+    databases:
+      - { binding: DB, driver: postgres }

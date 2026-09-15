@@ -98,6 +98,18 @@ type Registration struct {
 	// account that deployment has no reason to hold, to create something
 	// nothing will ever connect through.
 	When Condition
+	// Triggers, if non-nil, restricts this registration to services that
+	// declare one of these trigger values (a manifest concept — "http",
+	// "schedule" — this package never imports manifest to name them, so a
+	// caller building a registration passes the same string constants
+	// internal/manifest exports). Nil means every trigger, including a
+	// service that declares none at all: the common case, and the only
+	// behavior a registration predating the trigger vocabulary needs.
+	//
+	// See AppliesToTrigger for the exact matching rule, and its doc comment
+	// for why this is a plain field checked by the caller (internal/plan's
+	// expandCompute) rather than folded into When/Condition.
+	Triggers []string
 	// Resource implements the verbs.
 	Resource Resource
 }
@@ -119,6 +131,55 @@ func RequiresCapabilityVendor(capability, vendor string) Condition {
 // applies reports whether this registration is wanted for vendors.
 func (r Registration) applies(vendors map[string]string) bool {
 	return r.When == nil || r.When(vendors)
+}
+
+// AppliesToTrigger reports whether this registration is wanted for a
+// service declaring trigger.
+//
+// trigger == "" (a service with no compute: block at all, or one this
+// caller never resolved a trigger for) always matches, regardless of
+// Triggers — this is what keeps a manifest with no per-service compute
+// behaving exactly as it did before Triggers existed: every registration
+// for the capability still applies. Once a service does declare a trigger,
+// a registration with Triggers == nil still always matches (it does not
+// care what triggers the service), and one with a non-nil Triggers matches
+// only when trigger is in the list.
+//
+// # Why this is not a second Condition
+//
+// Condition is deliberately a pure function of one thing that is the same
+// for every service in a manifest: which vendor fulfils each capability.
+// A service's trigger is not that — it varies service to service within a
+// single manifest, so answering "does this registration apply" for it
+// cannot be folded into Resolve, which resolves once per capability and
+// returns the same registrations regardless of which service asked.
+// Growing Condition's signature to also take a trigger would force every
+// existing Condition (RequiresCapabilityVendor included) to ignore a
+// parameter that only compute registrations ever use, and would move the
+// resolution decision into Registry, which then has to be called once per
+// service instead of once per capability for no benefit. Keeping Triggers
+// a separate, optional field lets Resolve stay exactly what it is — a
+// function of capability and vendor choice — and lets the one caller that
+// actually knows a service's trigger (expandCompute) apply this filter
+// itself, after Resolve, the same way it already reads Registration.Phase
+// and Registration.Type to build a plan item.
+//
+// A second closure-typed field shaped like Condition (e.g. "func(trigger
+// string) bool") was also considered and rejected: Triggers only ever
+// needs "is this value in a small fixed set", which a []string answers
+// directly and lets a caller inspect (list the triggers a registration
+// applies to) without invoking it — a plain value is simpler than a
+// function for a question this narrow.
+func (r Registration) AppliesToTrigger(trigger string) bool {
+	if trigger == "" || r.Triggers == nil {
+		return true
+	}
+	for _, t := range r.Triggers {
+		if t == trigger {
+			return true
+		}
+	}
+	return false
 }
 
 // Key is the registry key, "provider/type".

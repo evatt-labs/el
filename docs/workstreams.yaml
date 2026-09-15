@@ -424,7 +424,7 @@ workstreams:
 
   - id: per-service-compute
     title: Per-service compute configuration and trigger shape
-    status: proposed
+    status: done
     depends: [plan-apply-destroy]
     decisions: [D34, D36]
     findings:

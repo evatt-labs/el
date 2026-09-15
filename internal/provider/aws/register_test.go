@@ -42,6 +42,43 @@ func TestRegisterWiresEveryType(t *testing.T) {
 	}
 }
 
+// TestComputeRegistrationsTriggerGating is the per-service-compute fix
+// pinned at this package's own boundary: the API Gateway registration only
+// applies to an HTTP-triggered service, while the Lambda function
+// registration applies regardless — the exact shape that stops a
+// schedule-invoked service like kraai-api's `tick` from planning an API
+// Gateway nothing will ever call.
+func TestComputeRegistrationsTriggerGating(t *testing.T) {
+	regs := Registrations(&Client{})
+
+	var function, httpAPI resource.Registration
+	for _, r := range regs {
+		switch r.Type {
+		case TypeLambdaFunction:
+			function = r
+		case TypeAPIGatewayV2API:
+			httpAPI = r
+		}
+	}
+
+	if function.Triggers != nil {
+		t.Fatalf("TypeLambdaFunction.Triggers = %v, want nil: every service gets a function regardless of trigger", function.Triggers)
+	}
+	if !function.AppliesToTrigger(manifest.TriggerHTTP) || !function.AppliesToTrigger(manifest.TriggerSchedule) || !function.AppliesToTrigger("") {
+		t.Fatal("TypeLambdaFunction must apply to every trigger, including none declared")
+	}
+
+	if !httpAPI.AppliesToTrigger(manifest.TriggerHTTP) {
+		t.Error("TypeAPIGatewayV2API must apply to an HTTP-triggered service")
+	}
+	if httpAPI.AppliesToTrigger(manifest.TriggerSchedule) {
+		t.Error("TypeAPIGatewayV2API must not apply to a schedule-triggered service — this is the bug this workstream fixes")
+	}
+	if !httpAPI.AppliesToTrigger("") {
+		t.Error("TypeAPIGatewayV2API must still apply to a service declaring no compute: block, unchanged from before Triggers existed")
+	}
+}
+
 func TestRegisterPropagatesADuplicateRegistrationError(t *testing.T) {
 	// Registry.Register already rejects a duplicate provider/type key
 	// (tested in internal/resource); this proves Register's own loop

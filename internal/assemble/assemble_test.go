@@ -232,10 +232,37 @@ func TestRegistry_NeonAlongsideCloudflareRegistersBothHalves(t *testing.T) {
 	}
 }
 
-func TestRegistry_AWSMissingSettings(t *testing.T) {
+// TestRegistry_AWSMissingRegionFallsBackToSDKDefaultChain pins the region
+// fix: a manifest that configures aws compute but never sets
+// providers.compute.settings.region must still build a working registry,
+// leaving the AWS SDK's own default chain (AWS_REGION, shared config,
+// IMDS) to resolve a region — not fail to load at all, which is what an
+// earlier version of aws.DecodeSettings did by treating region as
+// required.
+func TestRegistry_AWSMissingRegionFallsBackToSDKDefaultChain(t *testing.T) {
 	clearCreds(t)
 	m := manifestWith(manifest.Providers{
 		Compute: &manifest.Provider{Vendor: vendorAWS},
+	})
+
+	reg, err := Registry(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Registry: %v", err)
+	}
+	if _, ok := reg.Lookup("aws/AWS::Lambda::Function"); !ok {
+		t.Error("expected aws/AWS::Lambda::Function to be registered even with no manifest region")
+	}
+}
+
+// TestRegistry_AWSRegionWrongTypeIsStillAnError covers the case
+// DecodeSettings' region-optional change must not silently swallow: a
+// manifest author who wrote a non-string region made a real mistake, not
+// "said nothing" — treating the two the same would hide the mistake behind
+// whichever region the SDK's own chain happened to resolve instead.
+func TestRegistry_AWSRegionWrongTypeIsStillAnError(t *testing.T) {
+	clearCreds(t)
+	m := manifestWith(manifest.Providers{
+		Compute: &manifest.Provider{Vendor: vendorAWS, Settings: map[string]any{"region": 12345}},
 	})
 
 	_, err := Registry(context.Background(), m)
@@ -243,7 +270,7 @@ func TestRegistry_AWSMissingSettings(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 	if !strings.Contains(err.Error(), "region") {
-		t.Fatalf("error did not name the missing region: %v", err)
+		t.Fatalf("error did not name the bad region: %v", err)
 	}
 }
 

@@ -1,0 +1,7 @@
+version: 1
+
+providers:
+  compute:
+    vendor: aws
+    settings:
+      region: us-east-1

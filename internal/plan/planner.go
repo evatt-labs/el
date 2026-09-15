@@ -201,8 +201,16 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 //
 // It carries the service directory in its config because that is the one
 // thing a compute provider cannot derive: everything else about how to build
-// and deploy comes from providers.compute.settings, but where the code lives
-// is per service.
+// and deploy comes from providers.compute.settings (merged with the
+// service's own, per svc.Compute.Settings), but where the code lives is per
+// service.
+//
+// A service's Compute block, when present, also decides which of the
+// vendor's registered resource types actually apply: see
+// resource.Registration.Triggers and AppliesToTrigger. This is the fix for
+// the bug that motivated this workstream — every service used to plan one
+// resource per type the compute vendor registers, regardless of whether
+// that type made sense for what the service actually does.
 func (p *Planner) expandCompute(
 	m *manifest.Manifest, environmentName, svcKey string, svc manifest.Service,
 ) ([]plannedItem, error) {
@@ -211,11 +219,44 @@ func (p *Planner) expandCompute(
 		return nil, err
 	}
 
+	// providerSettings is present because the caller (expand) only reaches
+	// expandCompute when Providers.For(CapabilityCompute) already
+	// succeeded.
+	provider, _ := m.Root.Providers.For(manifest.CapabilityCompute)
+
+	// A service with no Compute block carries no trigger and no settings
+	// override of its own. trigger == "" is what makes
+	// AppliesToTrigger keep every registered type for it, matching
+	// behavior from before this field existed; mergedSettings then reduces
+	// to the provider's settings unchanged.
+	var trigger string
+	var svcSettings map[string]any
+	var handler, schedule string
+	if svc.Compute != nil {
+		trigger = svc.Compute.Trigger
+		svcSettings = svc.Compute.Settings
+		handler = svc.Compute.Handler
+		schedule = svc.Compute.Schedule
+	}
+	mergedSettings := manifest.MergeSettings(provider.Settings, svcSettings)
+
 	name := naming.ServiceName(environmentName, svcKey)
-	config := map[string]any{"dir": svc.Dir}
+	config := map[string]any{"dir": svc.Dir, "settings": mergedSettings}
+	if trigger != "" {
+		config["trigger"] = trigger
+	}
+	if handler != "" {
+		config["handler"] = handler
+	}
+	if schedule != "" {
+		config["schedule"] = schedule
+	}
 
 	out := make([]plannedItem, 0, len(regs))
 	for _, r := range regs {
+		if !r.AppliesToTrigger(trigger) {
+			continue
+		}
 		out = append(out, plannedItem{
 			Item: Item{
 				ServiceKey: svcKey, Binding: svcKey, Capability: manifest.CapabilityCompute,

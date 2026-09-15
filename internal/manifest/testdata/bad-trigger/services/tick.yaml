@@ -1,0 +1,5 @@
+services:
+  tick:
+    dir: .
+    compute:
+      trigger: cron
