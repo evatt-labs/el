@@ -237,6 +237,58 @@ holds the evidence archive, attestation history and cross-environment
 control view — evidence *retention* being the thing enterprises pay for and
 will not self-host.
 
+## Semantic search over schemas and diagnostics (direction, not a decision)
+
+Recorded 2026-09-15 as a candidate direction. Nothing here is decided and
+nothing on the current workstream path depends on it.
+
+The idea: use embeddings plus vector search, held in a **temporary
+in-memory SQLite database** built at process start and discarded at exit,
+for the two places in kraai where the question is genuinely fuzzy.
+
+**Where it fits.**
+
+- **Schema discovery across the resource surface.** Cloud Control exposes
+  1,598 FULLY_MUTABLE public types, each with a machine-readable
+  CloudFormation schema kraai already fetches (D17). "Which type gives me a
+  managed Redis?" is a similarity question over prose descriptions, not a
+  lookup — exactly what embeddings answer well and what exact-match search
+  answers badly.
+- **Mapping an opaque provider error to a remediation.** A real example
+  from this codebase: `InvalidRequestException: Missing or invalid
+  ResourceModel property` means "this type's list handler is
+  parent-scoped." Matching a provider's error prose against known
+  remediations is fuzzy matching, and today it is knowledge that lives only
+  in a doc comment someone has to already know to read.
+
+**Where it explicitly does NOT fit: execution ordering.** Resolving which
+resource must exist before another is a topological sort over exact,
+discrete edges. There is no similarity component to embed, and an
+approximate answer is a wrong build order rather than a slightly worse one.
+It is also not a performance problem: measured on this machine, Kahn's
+algorithm sorts 10,000 nodes across 20,000 edges in ~1ms and 100,000 nodes
+in ~12ms, against a measured 654-1282ms for a single Cloud Control
+ListResources call. One API round-trip costs roughly 640x more than
+ordering ten thousand resources, so the graph is free at any scale kraai
+targets and belongs in memory, built from the already-parsed manifest.
+
+**Constraints any implementation must respect.**
+
+- **In-memory only, never on disk.** A temporary on-disk database during
+  apply would be a state-file-shaped artifact, against D6, and against the
+  no-state/no-refresh thesis that is kraai's actual speed argument versus
+  Terraform.
+- **Advisory only.** It may inform diagnostics, suggestions and discovery.
+  It must never influence what gets created, ordered, or destroyed —
+  otherwise an approximate result becomes an infrastructure decision.
+- **Dependency cost is real.** D3 weighs dependency count as a security
+  surface for a CLI holding cloud credentials. Loading a SQLite vector
+  extension (sqlite-vec and similar) generally implies cgo, which also
+  costs the pure-Go cross-compilation story GoReleaser depends on (D1).
+  Whether a pure-Go driver plus a hand-rolled cosine similarity over a few
+  thousand vectors is sufficient is an open question, and given the corpus
+  size it probably is.
+
 ## Appendix: plugin runtime measurements (2026-09-13)
 
 Measured on a 24-thread i7-14650HX, wazero v1.12.0, Go 1.26.8, guest compiled
