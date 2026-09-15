@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/evatt-labs/kraai/internal/kerrors"
 	"github.com/evatt-labs/kraai/internal/resource"
 )
@@ -114,11 +117,66 @@ func bucketRef(ref resource.Ref) resource.Ref {
 	return resource.Ref{Provider: ref.Provider, Type: ref.Type, Name: artifactBucketName(ref.Name)}
 }
 
+// Get reports the real bucket's state, but only once ownership is
+// confirmed — Cloud Control's GetResource resolving a bucket name is not,
+// by itself, evidence this account has anything to do with it.
+//
+// # The bug this closes
+//
+// S3 bucket names are unique globally, across every AWS account, not just
+// this one, and Cloud Control's GetResource for AWS::S3::Bucket resolves
+// that global namespace without checking ownership at all. Verified
+// against the live Evatt Labs account (409032463870, us-east-1) with a
+// generic environment name ("dev") that this package's own
+// artifactBucketName would derive into "dev-api-artifacts":
+//
+//	$ aws s3api list-buckets --query "Buckets[?contains(Name,'dev-api')].Name"
+//	[]                                          # we own no such bucket
+//	$ aws s3api head-bucket --bucket dev-api-artifacts
+//	An error occurred (403) when calling the HeadBucket operation: Forbidden
+//	                                            # it exists, owned by someone else
+//	$ aws cloudcontrol get-resource --type-name AWS::S3::Bucket --identifier dev-api-artifacts
+//	{"BucketName":"dev-api-artifacts","Arn":"arn:aws:s3:::dev-api-artifacts", ...}
+//	                                            # full success
+//
+// Before this check existed, a.inner.Get's success here was read as "this
+// environment's own bucket exists, no change needed" unconditionally.
+// Generic environment names (dev, qa, test, staging — the names any team
+// reaches for first) make this likely, not exotic: "dev-api-artifacts"
+// was already taken by a stranger on the very first try against a real
+// account. See this workstream's PR description for the full
+// destroy/apply consequence chain a false no-change here enables.
+//
+// # A foreign bucket reads as absent, not as an error
+//
+// Client.OwnsBucket answers "does this account own it," definitively —
+// see that method's own doc comment for why it, not HeadBucket, is what
+// answers this and how it avoids the ambiguous-403 trap a HeadBucket-based
+// check would fall into. A confirmed-foreign bucket is reported here
+// exactly like a bucket Cloud Control never found at all: (nil, nil).
+// plan's own contract already treats that as "propose ActionCreate" (see
+// resource.Resource.Get's own doc comment) — which is the honest outcome
+// this workstream's brief asks for: apply then genuinely tries to create
+// the bucket, and S3 itself refuses with BucketAlreadyExists, naming the
+// real problem instead of kraai silently reusing a stranger's bucket.
 func (a *artifactBucketResource) Get(ctx context.Context, ref resource.Ref) (*resource.State, error) {
-	state, err := a.inner.Get(ctx, bucketRef(ref))
+	realRef := bucketRef(ref)
+
+	state, err := a.inner.Get(ctx, realRef)
 	if err != nil || state == nil {
 		return state, err
 	}
+
+	owned, err := a.client.OwnsBucket(ctx, realRef.Name)
+	if err != nil {
+		return nil, err
+	}
+	if !owned {
+		recordForeignBucket(ctx, realRef.Name,
+			"artifact bucket exists but is not owned by this account; reporting it as absent so plan proposes creating it")
+		return nil, nil
+	}
+
 	// Report the state under the caller's own Ref (the service-derived
 	// name), not the transformed bucket name: everything above this type
 	// (plan, the lockfile) identifies this resource by the Ref the
@@ -127,6 +185,29 @@ func (a *artifactBucketResource) Get(ctx context.Context, ref resource.Ref) (*re
 	// registration for the same service.
 	state.Ref = ref
 	return state, nil
+}
+
+// recordForeignBucket leaves a diagnostic trail for a bucket this method
+// or Delete declined to treat as this account's own, rather than letting
+// that decision vanish silently into a bare (nil, nil) or nil return — an
+// operator staring at an unexpected "create" or a skipped delete in a
+// plan/destroy run has no other way to learn why.
+//
+// Recorded as a span event on ctx's active span (a no-op when tracing
+// isn't active, e.g. every test in this package) rather than a log line:
+// this package has no logger of its own — internal/resource's own
+// Instrument decorator (D17) is the only structured-output mechanism
+// anything above this package already wires up, and every Get/Delete call
+// this method can be reached from is already running inside the span that
+// decorator starts (resource/otel.go's instrumented.observe wraps ctx
+// before calling into the inner Resource). Riding that existing span
+// keeps this diagnostic attached to the exact call it explains, with no
+// new package dependency and no forbidigo violation (fmt.Print* is
+// forbidden outside cmd/kraai per D18).
+func recordForeignBucket(ctx context.Context, bucketName, message string) {
+	trace.SpanFromContext(ctx).AddEvent(message, trace.WithAttributes(
+		attribute.String("kraai.bucket_name", bucketName),
+	))
 }
 
 func (a *artifactBucketResource) Create(ctx context.Context, spec resource.Spec) (*resource.State, error) {
@@ -213,8 +294,48 @@ func (a *artifactBucketResource) Update(context.Context, resource.Ref, resource.
 // means an already-fully-deleted bucket takes the exact same path as a
 // bucket freshly emptied here, with no extra branching either method needs
 // to expose to the other.
+//
+// # Ownership is checked here too, not only in Get, and cannot be bypassed
+//
+// Emptying a bucket (ListObjectsV2 then DeleteObjects) is the genuinely
+// destructive half of this whole file — see Get's own doc comment for the
+// live foreign-bucket evidence that motivated checking ownership at all.
+// This method re-derives that answer itself with Client.OwnsBucket rather
+// than trusting that whatever called Delete already called Get first and
+// would have refused to proceed on a foreign bucket: internal/destroy is
+// manifest-driven, not lockfile-driven (see internal/resource/resource.go's
+// own package doc comment — "the authoritative answer to 'does this exist'
+// is always a fresh lookup"), and nothing in this type's contract
+// guarantees Get ran immediately before Delete in the same process, on the
+// same information, with no chance for the world to have changed between
+// the two calls. A guard that only lived in Get would be bypassable by any
+// future caller — inside or outside this package — that reaches Delete on
+// its own, exactly the kind of gap Rule 20 (fail explicitly, never
+// silently) exists to close. Putting the check inside Delete itself is the
+// only placement that makes it unconditional: every path to the
+// destructive calls below runs through this method, and this method now
+// always asks first.
+//
+// A bucket this account does not own — because it was never this
+// account's to begin with, or because Cloud Control's byName resolve
+// found nothing at all — is treated as already gone: nothing to empty,
+// nothing to delete, success. That is exactly resource.Resource.Delete's
+// own "deleting something already absent is success" contract, extended
+// to cover "this was never ours to delete" as the same kind of no-op
+// rather than a new outcome this method would need its own branch for.
 func (a *artifactBucketResource) Delete(ctx context.Context, ref resource.Ref) error {
 	realRef := bucketRef(ref)
+
+	owned, err := a.client.OwnsBucket(ctx, realRef.Name)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		recordForeignBucket(ctx, realRef.Name,
+			"artifact bucket is not owned by this account; skipping emptying and deletion")
+		return nil
+	}
+
 	if err := a.client.EmptyBucket(ctx, realRef.Name); err != nil {
 		return err
 	}
