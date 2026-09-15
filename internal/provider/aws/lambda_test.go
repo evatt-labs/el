@@ -50,7 +50,10 @@ func TestLambdaFunctionCreatePackagesUploadsAndWiresProperties(t *testing.T) {
 		t.Fatalf("buildArtifact: %v", err)
 	}
 
-	fc := &fakeClient{createID: "myenv-api", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "myenv-api", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+	}
 	fs3 := &fakeS3{}
 	fsts := &fakeSTS{account: "123456789012"}
 	fn := newLambdaFunctionResourceForTest(fc, fs3, fsts)
@@ -110,7 +113,10 @@ func TestLambdaFunctionEnvLiteralsAndSecrets(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	fc := &fakeClient{createID: "myenv-api", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "myenv-api", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+	}
 	fn := newLambdaFunctionResourceForTest(fc, &fakeS3{}, &fakeSTS{account: "123456789012"})
 
 	spec := baseLambdaSpec(t, dir, map[string]any{

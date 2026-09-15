@@ -15,7 +15,10 @@ func newIAMRoleResourceForTest(fc *fakeClient) *iamRoleResource {
 }
 
 func TestIAMRoleCreateAlwaysIncludesBasicExecutionPolicy(t *testing.T) {
-	fc := &fakeClient{createID: "myenv-api", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "myenv-api", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/RoleName"}},
+	}
 	role := newIAMRoleResourceForTest(fc)
 
 	spec := resource.Spec{
@@ -48,7 +51,10 @@ func TestIAMRoleCreateAlwaysIncludesBasicExecutionPolicy(t *testing.T) {
 }
 
 func TestIAMRoleCreateAppendsSettingsManagedPolicies(t *testing.T) {
-	fc := &fakeClient{createID: "myenv-api", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "myenv-api", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/RoleName"}},
+	}
 	role := newIAMRoleResourceForTest(fc)
 
 	spec := resource.Spec{
@@ -73,7 +79,10 @@ func TestIAMRoleDoesNotRequireLambdaOnlySettings(t *testing.T) {
 	// runtime/architecture/layerArn are required for a Lambda function but
 	// have nothing to do with its role; a role Create/DiffersFromState must
 	// not fail just because those Lambda-only settings are unset.
-	fc := &fakeClient{createID: "myenv-api", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "myenv-api", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/RoleName"}},
+	}
 	role := newIAMRoleResourceForTest(fc)
 
 	spec := resource.Spec{Name: "myenv-api", Config: map[string]any{}}

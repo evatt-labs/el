@@ -23,7 +23,10 @@ func newEventsRuleResourceForTest(fc *fakeClient, sts *fakeSTS) *eventsRuleResou
 }
 
 func TestEventsRuleCreateBuildsTheFunctionARN(t *testing.T) {
-	fc := &fakeClient{createID: "rule1", createProps: map[string]any{}}
+	fc := &fakeClient{
+		createID: "rule1", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/Name"}},
+	}
 	sts := &fakeSTS{account: "123456789012"}
 	rule := newEventsRuleResourceForTest(fc, sts)
 

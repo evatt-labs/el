@@ -35,6 +35,7 @@ func TestArtifactBucketResourceRewritesNameBothWays(t *testing.T) {
 		byIdentifier: map[string]map[string]any{realBucket: {"BucketName": realBucket}},
 		createID:     realBucket,
 		createProps:  map[string]any{"BucketName": realBucket},
+		schema:       Schema{PrimaryIdentifier: []string{"/properties/BucketName"}},
 	}
 	bucket := &artifactBucketResource{
 		inner: &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
