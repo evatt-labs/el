@@ -21,6 +21,12 @@ const (
 	TypeRoute53RecordSet              = "AWS::Route53::RecordSet"
 )
 
+// Tier 2 compute types (aws-provider-compute): what it takes to actually run
+// a deployed Lambda, beyond the function and its HTTP front door registered
+// above. TypeArtifactBucket is this package's own registry vocabulary, not
+// a real Cloud Control TypeName — see its own doc comment in
+// artifactbucket.go for why.
+
 // Register adds every type in this package to reg.
 func Register(reg *resource.Registry, client *Client) error {
 	for _, r := range Registrations(client) {
@@ -160,15 +166,111 @@ func Registrations(client *Client) []resource.Registration {
 			// No Triggers restriction: every service with AWS compute gets
 			// a Lambda function regardless of how it's invoked — an HTTP
 			// handler and a scheduled handler are both, in the end, a
-			// function. What differs between them (the API Gateway in
-			// front, or not) is the other registration below.
+			// function. What differs between them (the API Gateway/Url in
+			// front, or the schedule rule behind it) is the other
+			// registrations in this list.
 			//
 			// FunctionName is settable at create; CloudFormation marks it
 			// "Update requires: Replacement", i.e. a createOnlyProperty and
 			// this type's Ref (aws-resource-lambda-function.html) — D7's
 			// derivable-name assumption holds.
+			//
+			// Resource is newLambdaFunctionResource, not a plain
+			// resourceType: this is where a deployment package actually
+			// gets built and uploaded (lambda.go) before Cloud Control ever
+			// sees a Code property. See lambda.go's own doc comment.
 			Lookup:   resource.LookupByName,
-			Resource: &resourceType{provider: Provider, typeName: TypeLambdaFunction, lookup: resource.LookupByName, client: client},
+			Resource: newLambdaFunctionResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeArtifactBucket,
+			Capability: manifest.CapabilityCompute,
+			// Ahead of the function in PhaseCompute that uploads its
+			// artifact there — phase-as-ordering, not phase-as-category,
+			// the same technique and the same caveat PR #75 already
+			// documented for ACM validation records and the
+			// S3/CloudFront pair above: D12's two-level phase model has no
+			// finer-grained dependency expression than "which phase," so
+			// "before the function" is expressed by placing this in the
+			// phase before PhaseCompute rather than by a real dependency
+			// edge. See artifactbucket.go's own doc comment for the
+			// further deviation this registration carries: one bucket per
+			// service, not the brief's one bucket per environment.
+			Phase: resource.PhaseStorage,
+			// FunctionName-equivalent for a bucket is BucketName, settable
+			// and unique at create (see TypeS3Bucket's own registration
+			// above) — D7's derivable-name assumption holds here too; this
+			// is byName against artifactBucketName's derived name, not
+			// against ref.Name directly (see artifactBucketResource.Get).
+			Lookup:   resource.LookupByName,
+			Resource: newArtifactBucketResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeIAMRole,
+			Capability: manifest.CapabilityCompute,
+			// Ahead of the function that assumes it — see
+			// TypeArtifactBucket's registration above for the identical
+			// phase-as-ordering reasoning; this is the case the brief
+			// itself names.
+			Phase: resource.PhaseStorage,
+			// RoleName is settable at create; IAM's own reference marks
+			// renaming a role "Update requires: Replacement" — D7 holds.
+			Lookup:   resource.LookupByName,
+			Resource: newIAMRoleResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeSSMParameter,
+			Capability: manifest.CapabilityCompute,
+			// Same phase as the function whose artifact key it publishes;
+			// no ordering dependency between the two (see ssmparameter.go:
+			// each computes its own artifact key from the same pure input
+			// rather than depending on the other's output), so PhaseCompute
+			// is a category here, not an ordering device.
+			Phase: resource.PhaseCompute,
+			// Name is settable at create; SSM's own reference marks it
+			// "Update requires: Replacement" — D7 holds, against the
+			// derived parameter path (see ssmParamRef), not ref.Name
+			// directly.
+			Lookup:   resource.LookupByName,
+			Resource: newSSMParameterResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeLambdaURL,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// HTTP-triggered services only — see lambdaurl.go's own doc
+			// comment on why this coexists with ApiGatewayV2::Api under
+			// the identical gate.
+			Triggers: []string{manifest.TriggerHTTP},
+			// Lambda::Url has no Tags property at all (verified against
+			// its CloudFormation resource reference: AuthType, Cors,
+			// InvokeMode, Qualifier, TargetFunctionArn only) — byTag is
+			// unavailable here the way it is for ApiGatewayV2::Api. Its own
+			// Name-equivalent identifier is TargetFunctionArn, which Lambda
+			// itself guarantees at most one Function URL per function per
+			// qualifier — a real uniqueness guarantee, so byAttr applies
+			// (see lambdaURLMatch's own doc comment for the one part of
+			// this that is not independently verified).
+			Lookup:   resource.LookupByAttr,
+			Resource: newLambdaURLResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeEventsRule,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// Schedule-triggered services only — the direct fix for the bug
+			// that originally motivated Triggers: a schedule rule belongs
+			// only to a service with a schedule expression to run, exactly
+			// as ApiGatewayV2::Api/Lambda::Url belong only to one with an
+			// HTTP surface.
+			Triggers: []string{manifest.TriggerSchedule},
+			// Name is settable at create; EventBridge's own reference marks
+			// it "Update requires: Replacement" — D7 holds. See
+			// eventsrule.go's own doc comment for why Events::Rule was
+			// chosen over EventBridge Scheduler, and for the
+			// AWS::Lambda::Permission gap this registration does not close.
+			Lookup:   resource.LookupByName,
+			Resource: newEventsRuleResource(client),
 		},
 		{
 			Provider: Provider, Type: TypeAPIGatewayV2API,

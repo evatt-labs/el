@@ -1,9 +1,11 @@
 package aws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,6 +14,8 @@ import (
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
@@ -59,6 +63,27 @@ type cloudFormationAPI interface {
 	DescribeType(ctx context.Context, params *cloudformation.DescribeTypeInput, optFns ...func(*cloudformation.Options)) (*cloudformation.DescribeTypeOutput, error)
 }
 
+// s3API is the subset of *s3.Client this package calls: PutObject, to
+// upload a Lambda deployment artifact to the per-environment artifact
+// bucket (aws-provider-compute).
+//
+// Deliberately not Cloud-Control-routed like every other verb in this
+// package: Cloud Control manages a bucket's own existence
+// (AWS::S3::Bucket's Get/Create/Delete), but has no notion of "put this
+// object in it" — object data planes are not part of the Cloud Control
+// resource-provider surface for any type. This is the one place this
+// package reaches past Cloud Control to a service-specific SDK client,
+// for exactly the operation Cloud Control cannot express.
+type s3API interface {
+	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+}
+
+// stsAPI is the subset of *sts.Client this package calls: GetCallerIdentity,
+// to resolve the AWS account id an ARN needs.
+type stsAPI interface {
+	GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error)
+}
+
 // Client is a thin Cloud Control + CloudFormation client.
 //
 // "Thin" here means its exported methods already speak this package's own
@@ -67,14 +92,36 @@ type cloudFormationAPI interface {
 // satisfied by *Client precisely because of that shape, so nothing above
 // this file needs to know the SDK exists.
 type Client struct {
-	cc cloudControlAPI
-	cf cloudFormationAPI
+	cc  cloudControlAPI
+	cf  cloudFormationAPI
+	s3  s3API
+	sts stsAPI
+
+	// region is the resolved AWS region every ARN this package constructs
+	// (see AccountID's doc comment) is built against. Set from the SDK
+	// config's own resolved value in New, not from Settings.Region
+	// directly — Settings.Region may be empty and deferred to the SDK's own
+	// resolution chain (see Settings.Region's doc comment), and by the time
+	// LoadDefaultConfig returns, cfg.Region already holds whatever that
+	// chain actually settled on.
+	region string
 
 	// Polling bounds for the async verbs. Defaulted in New, overridable via
 	// WithPollTimings.
 	pollInitialDelay time.Duration
 	pollMaxDelay     time.Duration
 	pollTimeout      time.Duration
+
+	// accountMu/accountID/accountLoaded cache the caller's AWS account id
+	// for the process's lifetime, the same lazy-on-first-use, cache-only-
+	// on-success shape resourceType.getSchema already uses and for the
+	// identical reason: more than one Tier 2 resource (the Lambda's own
+	// Role ARN, an EventBridge Rule's Target ARN) needs it, an account's id
+	// cannot change mid-process, and a single transient STS throttle should
+	// not be cached as a permanent failure.
+	accountMu     sync.Mutex
+	accountID     string
+	accountLoaded bool
 }
 
 // Option configures a Client.
@@ -89,6 +136,17 @@ func WithCloudControlAPI(api cloudControlAPI) Option {
 // WithCloudFormationAPI substitutes the CloudFormation caller.
 func WithCloudFormationAPI(api cloudFormationAPI) Option {
 	return func(c *Client) { c.cf = api }
+}
+
+// WithS3API substitutes the S3 caller, which is how tests exercise artifact
+// upload without an AWS account or network (D21).
+func WithS3API(api s3API) Option {
+	return func(c *Client) { c.s3 = api }
+}
+
+// WithSTSAPI substitutes the STS caller.
+func WithSTSAPI(api stsAPI) Option {
+	return func(c *Client) { c.sts = api }
 }
 
 // WithPollTimings overrides the backoff and overall timeout used to poll an
@@ -119,6 +177,9 @@ func New(ctx context.Context, settings Settings, opts ...Option) (*Client, error
 	c := &Client{
 		cc:               cloudcontrol.NewFromConfig(cfg),
 		cf:               cloudformation.NewFromConfig(cfg),
+		s3:               s3.NewFromConfig(cfg),
+		sts:              sts.NewFromConfig(cfg),
+		region:           cfg.Region,
 		pollInitialDelay: defaultPollInitialDelay,
 		pollMaxDelay:     defaultPollMaxDelay,
 		pollTimeout:      defaultPollTimeout,
@@ -518,4 +579,75 @@ func (c *Client) DescribeType(ctx context.Context, typeName string) (Schema, err
 		return Schema{}, kerrors.Wrap(err, kerrors.CodeUnexpected, "decoding schema for %s", typeName)
 	}
 	return schema, nil
+}
+
+// Region returns the AWS region this Client resolved at construction (see
+// the region field's own doc comment).
+func (c *Client) Region() string { return c.region }
+
+// PutObject uploads body to bucket/key, replacing any existing object at
+// that key.
+//
+// No existence check first: S3 PutObject is itself an overwrite, so a
+// HeadObject-then-PutObject round trip would only add a request without
+// changing the outcome. This package's callers additionally never call it
+// with the same key twice for different content — the artifact key is a
+// content hash (aws-provider-compute's zip determinism), so a repeat
+// PutObject for an unchanged input writes back bytes S3 already holds.
+func (c *Client) PutObject(ctx context.Context, bucket, key string, body []byte) error {
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body),
+	})
+	if err != nil {
+		return kerrors.Wrap(err, kerrors.CodeUnexpected, "uploading s3://%s/%s", bucket, key)
+	}
+	return nil
+}
+
+// AccountID returns the AWS account id the configured credentials
+// authenticate as, fetched once via STS GetCallerIdentity and cached for
+// the process's lifetime (see the Client.accountID field doc for why
+// caching, and why only on success).
+//
+// # Why this exists: ARN construction without a live cross-resource lookup
+//
+// A Lambda's execution Role property and an EventBridge Rule's Target Arn
+// both require a full ARN, not a bare name — unlike AWS::Lambda::Url's
+// TargetFunctionArn, which documents bare-name acceptance. The role and the
+// function it assumes into are ordered by phase (PhaseStorage before
+// PhaseCompute, see register.go), so a live GetResource lookup of the
+// role's Arn attribute would be safe. The function and its own triggers
+// (EventBridge Rule, Lambda Url) are not: both are registered in
+// PhaseCompute, which runs concurrently and gives no guarantee the function
+// exists yet when its rule's Create runs (the same class of same-phase
+// ordering gap register.go's own doc comment already flags for
+// RecordSet/CloudFront/Certificate). Constructing every ARN this package
+// needs locally, from the account id plus the region plus the resource's
+// own derived name, removes the dependency entirely rather than papering
+// over a race with a retry.
+//
+// Assumes the "aws" partition. kraai's stated first deployment target is
+// commercial AWS for kraai.dev's own infrastructure (D24); GovCloud/China
+// partitions, whose ARNs use "aws-us-gov"/"aws-cn", are not something this
+// workstream verified against and are out of scope here.
+func (c *Client) AccountID(ctx context.Context) (string, error) {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	if c.accountLoaded {
+		return c.accountID, nil
+	}
+
+	out, err := c.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", kerrors.Wrap(err, kerrors.CodeUnexpected, "resolving the AWS account id via STS")
+	}
+	if out.Account == nil || *out.Account == "" {
+		return "", kerrors.Validation("STS GetCallerIdentity returned no account id")
+	}
+
+	c.accountID = *out.Account
+	c.accountLoaded = true
+	return c.accountID, nil
 }

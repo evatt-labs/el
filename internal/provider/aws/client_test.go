@@ -13,6 +13,8 @@ import (
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
@@ -357,6 +359,22 @@ func TestNew(t *testing.T) {
 		}
 		if _, err := c.DescribeType(context.Background(), TypeS3Bucket); err != nil {
 			t.Fatalf("DescribeType through the injected fake: %v", err)
+		}
+	})
+
+	t.Run("WithS3API and WithSTSAPI substitute their clients", func(t *testing.T) {
+		fs3 := &fakeS3{}
+		fsts := &fakeSTS{account: "123456789012"}
+
+		c, err := New(context.Background(), Settings{Region: "us-east-1"}, WithS3API(fs3), WithSTSAPI(fsts))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := c.PutObject(context.Background(), "b", "k", []byte("x")); err != nil {
+			t.Fatalf("PutObject through the injected fake: %v", err)
+		}
+		if _, err := c.AccountID(context.Background()); err != nil {
+			t.Fatalf("AccountID through the injected fake: %v", err)
 		}
 	})
 
@@ -742,6 +760,106 @@ func TestClientDeleteResource(t *testing.T) {
 			t.Fatal("expected an error")
 		}
 	})
+}
+
+// fakeS3 is a hand-rolled s3API: no AWS account, no network (D21).
+type fakeS3 struct {
+	err  error
+	reqs []*s3.PutObjectInput
+}
+
+func (f *fakeS3) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	f.reqs = append(f.reqs, params)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &s3.PutObjectOutput{}, nil
+}
+
+// fakeSTS is a hand-rolled stsAPI: no AWS account, no network (D21).
+type fakeSTS struct {
+	account string
+	err     error
+	calls   int
+}
+
+func (f *fakeSTS) GetCallerIdentity(context.Context, *sts.GetCallerIdentityInput, ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &sts.GetCallerIdentityOutput{Account: aws.String(f.account)}, nil
+}
+
+func TestClientPutObject(t *testing.T) {
+	t.Run("uploads to bucket/key", func(t *testing.T) {
+		fs3 := &fakeS3{}
+		c := &Client{s3: fs3}
+
+		if err := c.PutObject(context.Background(), "my-bucket", "svc/abc123.zip", []byte("zip-bytes")); err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		if len(fs3.reqs) != 1 {
+			t.Fatalf("got %d PutObject calls, want 1", len(fs3.reqs))
+		}
+		if *fs3.reqs[0].Bucket != "my-bucket" || *fs3.reqs[0].Key != "svc/abc123.zip" {
+			t.Fatalf("request = %+v", fs3.reqs[0])
+		}
+	})
+
+	t.Run("wraps an error", func(t *testing.T) {
+		c := &Client{s3: &fakeS3{err: errors.New("access denied")}}
+		if err := c.PutObject(context.Background(), "b", "k", nil); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+}
+
+func TestClientAccountID(t *testing.T) {
+	t.Run("resolves and caches", func(t *testing.T) {
+		fsts := &fakeSTS{account: "123456789012"}
+		c := &Client{sts: fsts}
+
+		id, err := c.AccountID(context.Background())
+		if err != nil || id != "123456789012" {
+			t.Fatalf("AccountID = %q, err %v", id, err)
+		}
+		if _, err := c.AccountID(context.Background()); err != nil {
+			t.Fatalf("second AccountID call: %v", err)
+		}
+		if fsts.calls != 1 {
+			t.Fatalf("STS called %d times, want exactly 1 (cached after first success)", fsts.calls)
+		}
+	})
+
+	t.Run("a transient failure is not cached", func(t *testing.T) {
+		fsts := &fakeSTS{err: errors.New("throttled")}
+		c := &Client{sts: fsts}
+
+		if _, err := c.AccountID(context.Background()); err == nil {
+			t.Fatal("expected an error")
+		}
+		fsts.err = nil
+		fsts.account = "999999999999"
+		id, err := c.AccountID(context.Background())
+		if err != nil || id != "999999999999" {
+			t.Fatalf("retry after failure: id=%q err=%v", id, err)
+		}
+	})
+
+	t.Run("no account id in the response is an error", func(t *testing.T) {
+		c := &Client{sts: &fakeSTS{account: ""}}
+		if _, err := c.AccountID(context.Background()); err == nil {
+			t.Fatal("expected an error for an empty account id")
+		}
+	})
+}
+
+func TestClientRegion(t *testing.T) {
+	c := &Client{region: "us-west-2"}
+	if got := c.Region(); got != "us-west-2" {
+		t.Fatalf("Region() = %q, want %q", got, "us-west-2")
+	}
 }
 
 func TestClientPollTimingsDefaults(t *testing.T) {

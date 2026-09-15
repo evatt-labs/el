@@ -28,6 +28,11 @@ func TestRegisterWiresEveryType(t *testing.T) {
 		{Provider + "/" + TypeRoute53RecordSet, manifest.CapabilityObjects, resource.PhaseCompute, resource.LookupByAttr},
 		{Provider + "/" + TypeLambdaFunction, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
 		{Provider + "/" + TypeAPIGatewayV2API, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByTag},
+		{Provider + "/" + TypeArtifactBucket, manifest.CapabilityCompute, resource.PhaseStorage, resource.LookupByName},
+		{Provider + "/" + TypeIAMRole, manifest.CapabilityCompute, resource.PhaseStorage, resource.LookupByName},
+		{Provider + "/" + TypeSSMParameter, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
+		{Provider + "/" + TypeLambdaURL, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByAttr},
+		{Provider + "/" + TypeEventsRule, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
@@ -51,15 +56,13 @@ func TestRegisterWiresEveryType(t *testing.T) {
 func TestComputeRegistrationsTriggerGating(t *testing.T) {
 	regs := Registrations(&Client{})
 
-	var function, httpAPI resource.Registration
+	byType := map[string]resource.Registration{}
 	for _, r := range regs {
-		switch r.Type {
-		case TypeLambdaFunction:
-			function = r
-		case TypeAPIGatewayV2API:
-			httpAPI = r
-		}
+		byType[r.Type] = r
 	}
+	function, httpAPI := byType[TypeLambdaFunction], byType[TypeAPIGatewayV2API]
+	bucket, role, param := byType[TypeArtifactBucket], byType[TypeIAMRole], byType[TypeSSMParameter]
+	url, rule := byType[TypeLambdaURL], byType[TypeEventsRule]
 
 	if function.Triggers != nil {
 		t.Fatalf("TypeLambdaFunction.Triggers = %v, want nil: every service gets a function regardless of trigger", function.Triggers)
@@ -76,6 +79,33 @@ func TestComputeRegistrationsTriggerGating(t *testing.T) {
 	}
 	if !httpAPI.AppliesToTrigger("") {
 		t.Error("TypeAPIGatewayV2API must still apply to a service declaring no compute: block, unchanged from before Triggers existed")
+	}
+
+	// The artifact bucket, execution role and artifact-key parameter apply
+	// to every compute service unconditionally — every Lambda needs a
+	// package, a role and (this package's own choice) a discoverable
+	// artifact-key parameter regardless of how it's invoked.
+	for name, reg := range map[string]resource.Registration{"bucket": bucket, "role": role, "param": param} {
+		if reg.Triggers != nil {
+			t.Errorf("%s.Triggers = %v, want nil", name, reg.Triggers)
+		}
+		if !reg.AppliesToTrigger(manifest.TriggerHTTP) || !reg.AppliesToTrigger(manifest.TriggerSchedule) || !reg.AppliesToTrigger("") {
+			t.Errorf("%s must apply to every trigger", name)
+		}
+	}
+
+	if !url.AppliesToTrigger(manifest.TriggerHTTP) {
+		t.Error("TypeLambdaURL must apply to an HTTP-triggered service")
+	}
+	if url.AppliesToTrigger(manifest.TriggerSchedule) {
+		t.Error("TypeLambdaURL must not apply to a schedule-triggered service")
+	}
+
+	if !rule.AppliesToTrigger(manifest.TriggerSchedule) {
+		t.Error("TypeEventsRule must apply to a schedule-triggered service")
+	}
+	if rule.AppliesToTrigger(manifest.TriggerHTTP) {
+		t.Error("TypeEventsRule must not apply to an HTTP-triggered service")
 	}
 }
 
@@ -131,8 +161,25 @@ func TestRegisterExpandsCapabilitiesInPhaseOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve compute: %v", err)
 	}
-	if len(compute) != 2 || compute[0].Type != TypeLambdaFunction || compute[1].Type != TypeAPIGatewayV2API {
-		t.Fatalf("compute = %+v, want [LambdaFunction, ApiGatewayV2Api]", compute)
+	wantCompute := []string{
+		TypeArtifactBucket, TypeIAMRole, // PhaseStorage, registration order
+		TypeLambdaFunction, TypeSSMParameter, TypeLambdaURL, TypeEventsRule, TypeAPIGatewayV2API, // PhaseCompute, registration order
+	}
+	if len(compute) != len(wantCompute) {
+		t.Fatalf("compute = %+v, want %d entries", compute, len(wantCompute))
+	}
+	for i, want := range wantCompute {
+		if compute[i].Type != want {
+			t.Fatalf("compute[%d].Type = %q, want %q (full: %+v)", i, compute[i].Type, want, compute)
+		}
+	}
+	if compute[0].Phase != resource.PhaseStorage || compute[1].Phase != resource.PhaseStorage {
+		t.Fatalf("compute = %+v, want the artifact bucket and role in PhaseStorage, ahead of the function that needs both", compute)
+	}
+	for _, r := range compute[2:] {
+		if r.Phase != resource.PhaseCompute {
+			t.Fatalf("compute = %+v, want everything after the bucket/role in PhaseCompute", compute)
+		}
 	}
 }
 

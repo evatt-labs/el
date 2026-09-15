@@ -469,26 +469,29 @@ workstreams:
 
   - id: aws-provider-compute
     title: AWS provider Tier 2 — Lambda/API resources (only if kraai-api exists)
-    status: proposed
+    status: done
     depends: [aws-provider-core]
     decisions: [D24]
     scope:
       - >-
         Register Tier 2 resource types on the generic engine built in
         `aws-provider-core`: `AWS::Lambda::Function`, `AWS::Lambda::Url`,
-        `AWS::IAM::Role`, `AWS::SSM::Parameter`,
-        `AWS::Events::Rule`/Scheduler. No new engine work — per-type
-        registration plus schema-derived validation only.
+        `AWS::IAM::Role`, `AWS::SSM::Parameter`, `AWS::Events::Rule`
+        (chosen over EventBridge Scheduler — see the PR description). No
+        new engine work — per-type registration plus schema-derived
+        validation only.
       - >-
         Lambda artifact packaging: zip plus the Lambda Web Adapter layer
-        (runs an unmodified FastAPI ASGI app, so a later move to Fargate is
-        a repackage rather than a rewrite), not a container image — no ECR
-        cost, faster cold start.
+        (runs an unmodified ASGI app, so a later move to Fargate is a
+        repackage rather than a rewrite), not a container image — no ECR
+        cost, faster cold start. A per-service S3 artifact bucket
+        (PhaseStorage, ahead of the function) holds the built zips;
+        determinism is enforced and tested directly.
     blocked_on: >-
-      Whether kraai.dev has a hosted API at all. The business model is
-      explicitly undecided as of 2026-09-13; kraai may reduce to an OSS
-      product site, in which case this workstream is never built. Nothing
-      else depends on it.
+      Resolved: compute targets AWS Lambda (this workstream), so kraai.dev
+      does have a hosted-API shape as of this PR. Whether kraai.dev ships
+      one in production is still kraai-api's own call, not this
+      document's.
     acceptance:
       - >-
         Same two acceptance criteria as aws-provider-core, for the Tier 2
@@ -497,7 +500,10 @@ workstreams:
     smoke_notes: >-
       Only meaningful once kraai-api exists. kraai-api/docs/BLUEPRINT.md is
       stale and parked (it still documents Cloudflare Containers) — do not
-      build against it without revising it first.
+      build against it without revising it first. This PR ships no live
+      AWS smoke test (D21: no network, no AWS account in unit tests);
+      smoke verification against a real kraai-api manifest is left to
+      whoever builds kraai-api itself.
 
   - id: cloudflare-provider
     title: Built-in cloudflare provider — Worker, D1, KV, R2, Queues, Hyperdrive
