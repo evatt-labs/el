@@ -44,6 +44,7 @@ func NewRootCommand() *cobra.Command {
 
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newPlanCommand(assemble.Registry))
+	root.AddCommand(newApplyCommand(assemble.Registry))
 
 	return root
 }
