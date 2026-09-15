@@ -1,0 +1,532 @@
+package destroy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/evatt-labs/kraai/internal/kerrors"
+	"github.com/evatt-labs/kraai/internal/plan"
+	"github.com/evatt-labs/kraai/internal/resource"
+)
+
+// newRegistry builds a resource.Registry from hand-written registrations,
+// failing the test if any registration is rejected. Mirrors
+// internal/apply/apply_test.go's helper of the same name.
+func newRegistry(t *testing.T, regs ...resource.Registration) *resource.Registry {
+	t.Helper()
+	reg := resource.NewRegistry()
+	for _, r := range regs {
+		if err := reg.Register(r); err != nil {
+			t.Fatalf("Register(%s/%s): %v", r.Provider, r.Type, err)
+		}
+	}
+	return reg
+}
+
+// action builds one plan.Action with the given identity, phase, and kind,
+// filling in the fields destroy actually reads. Mirrors
+// internal/apply/apply_test.go's helper of the same name.
+func action(serviceKey, binding, provider, typ string, phase resource.Phase, kind plan.ActionKind) plan.Action {
+	name := serviceKey + "-" + binding
+	return plan.Action{
+		Item: plan.Item{
+			ServiceKey: serviceKey, Binding: binding, Capability: "database",
+			Provider: provider, Type: typ, Phase: phase,
+		},
+		Ref:  resource.Ref{Provider: provider, Type: typ, Name: name},
+		Spec: resource.Spec{Binding: binding, Name: name},
+		Kind: kind,
+	}
+}
+
+func requireCode(t *testing.T, err error, code kerrors.Code) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	var kerr *kerrors.KError
+	if !errors.As(err, &kerr) {
+		t.Fatalf("expected a *kerrors.KError somewhere in the chain, got %T (%v)", err, err)
+	}
+	if kerr.Code() != code {
+		t.Fatalf("expected code %v, got %v (%v)", code, kerr.Code(), err)
+	}
+}
+
+func findResult(t *testing.T, res *Result, name string) ActionResult {
+	t.Helper()
+	for _, r := range res.Results {
+		if r.Ref.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("no result for %q in %+v", name, res.Results)
+	return ActionResult{}
+}
+
+// --- nil plan ---
+
+func TestDestroy_NilPlan_ReturnsEmptyResult(t *testing.T) {
+	result, err := New(resource.NewRegistry()).Destroy(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Destroy(nil): %v", err)
+	}
+	if result == nil || len(result.Results) != 0 {
+		t.Fatalf("Destroy(nil) = %+v, want an empty, non-nil Result", result)
+	}
+}
+
+// --- skip what does not exist ---
+
+func TestDestroy_SkipsAbsentResource_NoDeleteCall(t *testing.T) {
+	db := newFakeResource()
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db,
+	})
+
+	// ActionCreate means the plan's own Get found nothing: there is
+	// nothing to delete.
+	absent := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate)
+	p := &plan.Plan{Actions: []plan.Action{absent}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	r := findResult(t, result, "api-DB")
+	if r.Outcome != OutcomeSkipped {
+		t.Errorf("Outcome = %v, want OutcomeSkipped", r.Outcome)
+	}
+	if db.deleteCalls != 0 {
+		t.Errorf("deleteCalls = %d, want 0: an absent resource must never be issued a Delete call", db.deleteCalls)
+	}
+}
+
+// --- the central asymmetry with apply: ActionFailed still attempts delete ---
+
+func TestDestroy_ActionFailed_StillAttemptsDelete(t *testing.T) {
+	db := newFakeResource()
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db,
+	})
+
+	failed := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionFailed)
+	failed.Err = errors.New("get failed")
+	p := &plan.Plan{Actions: []plan.Action{failed}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	r := findResult(t, result, "api-DB")
+	if r.Outcome != OutcomeDeleted {
+		t.Errorf("Outcome = %v, want OutcomeDeleted: an unreadable resource must still be attempted", r.Outcome)
+	}
+	if db.deleteCalls != 1 {
+		t.Errorf("deleteCalls = %d, want 1", db.deleteCalls)
+	}
+}
+
+func TestDestroy_ActionFailed_DeleteAlsoFails_ReportsFailed(t *testing.T) {
+	db := newFakeResource()
+	db.deleteErr = errors.New("delete boom")
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db,
+	})
+
+	failed := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionFailed)
+	p := &plan.Plan{Actions: []plan.Action{failed}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	r := findResult(t, result, "api-DB")
+	if r.Outcome != OutcomeFailed || r.Err == nil {
+		t.Errorf("result = %+v, want OutcomeFailed with an error", r)
+	}
+	if db.deleteCalls != 1 {
+		t.Errorf("deleteCalls = %d, want 1", db.deleteCalls)
+	}
+}
+
+// --- deleting something already gone is success ---
+
+func TestDestroy_DeleteOfAlreadyGone_TreatedAsSuccess(t *testing.T) {
+	// resource.Resource.Delete's own contract (see resource.go) is that a
+	// nil error means success whether or not the resource was actually
+	// found — a fakeResource with no deleteErr set models exactly that: it
+	// never inspects the ref to decide whether "the thing" was really
+	// there, it simply reports success, the same as a real provider
+	// adapter deleting a resource a previous, partially-failed run had
+	// already removed.
+	gone := newFakeResource()
+	reg := newRegistry(t, resource.Registration{
+		Provider: "cf", Type: "kv", Capability: "keyvalue",
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: gone,
+	})
+
+	act := action("api", "CACHE", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange)
+	p := &plan.Plan{Actions: []plan.Action{act}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	r := findResult(t, result, "api-CACHE")
+	if r.Outcome != OutcomeDeleted {
+		t.Errorf("Outcome = %v, want OutcomeDeleted", r.Outcome)
+	}
+}
+
+// --- every non-Create kind is attempted ---
+
+func TestDestroy_ActionNoChangeAndActionReplace_BothDeleted(t *testing.T) {
+	kv := newFakeResource()
+	queue := newFakeResource()
+	reg := newRegistry(t,
+		resource.Registration{Provider: "cf", Type: "kv", Capability: "keyvalue",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: kv},
+		resource.Registration{Provider: "cf", Type: "queue", Capability: "queues",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: queue},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "CACHE", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange),
+		action("api", "QUEUE", "cf", "queue", resource.PhaseStorage, plan.ActionReplace),
+	}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if r := findResult(t, result, "api-CACHE"); r.Outcome != OutcomeDeleted {
+		t.Errorf("api-CACHE outcome = %v, want OutcomeDeleted", r.Outcome)
+	}
+	if r := findResult(t, result, "api-QUEUE"); r.Outcome != OutcomeDeleted {
+		t.Errorf("api-QUEUE outcome = %v, want OutcomeDeleted", r.Outcome)
+	}
+	if kv.deleteCalls != 1 || queue.deleteCalls != 1 {
+		t.Errorf("deleteCalls kv=%d queue=%d, want 1 each", kv.deleteCalls, queue.deleteCalls)
+	}
+}
+
+// --- resolve failure: plan and registry have drifted apart ---
+
+func TestDestroy_NoRegisteredType_ReportsFailed(t *testing.T) {
+	reg := resource.NewRegistry() // nothing registered
+	act := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange)
+	p := &plan.Plan{Actions: []plan.Action{act}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	r := findResult(t, result, "api-DB")
+	if r.Outcome != OutcomeFailed || r.Err == nil {
+		t.Errorf("result = %+v, want OutcomeFailed with an error", r)
+	}
+	if !strings.Contains(r.Err.Error(), "neon/branch") {
+		t.Errorf("error = %q, want it to name the drifted registry key", r.Err.Error())
+	}
+}
+
+// --- reverse phase order ---
+
+func TestDestroy_ReversePhaseOrder_ComputeBeforeStorageBeforeDatabase(t *testing.T) {
+	var order []string
+
+	// Each phase below carries exactly one action, so within a phase there
+	// is only ever one goroutine calling Delete at a time — runPhase's
+	// g.Wait() only returns once that goroutine finishes, and Destroy does
+	// not start the next phase until then, so appending to order needs no
+	// synchronization of its own: the three appends are serialized by
+	// Destroy's own phase loop, not by anything in this test.
+	compute := recordingResource(&order, "compute")
+	storage := recordingResource(&order, "storage")
+	db := recordingResource(&order, "database")
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "neon", Type: "branch", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db},
+		resource.Registration{Provider: "cf", Type: "kv", Capability: "keyvalue",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: storage},
+		resource.Registration{Provider: "cf", Type: "worker", Capability: "compute",
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange),
+		action("api", "CACHE", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange),
+		action("api", "api", "cf", "worker", resource.PhaseCompute, plan.ActionNoChange),
+	}}
+
+	if _, err := New(reg).Destroy(context.Background(), p); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if got := strings.Join(order, ","); got != "compute,storage,database" {
+		t.Fatalf("phase order = %q, want %q: teardown must run phases in reverse of apply's order",
+			got, "compute,storage,database")
+	}
+}
+
+// recordingResource returns a resource.Resource whose Delete appends label
+// to order before returning success. See the calling test for why this
+// needs no synchronization of its own.
+func recordingResource(order *[]string, label string) resource.Resource {
+	return &orderedFake{order: order, label: label}
+}
+
+type orderedFake struct {
+	order *[]string
+	label string
+}
+
+func (f *orderedFake) Get(context.Context, resource.Ref) (*resource.State, error) { return nil, nil }
+func (f *orderedFake) Create(context.Context, resource.Spec) (*resource.State, error) {
+	return nil, nil
+}
+func (f *orderedFake) Update(context.Context, resource.Ref, resource.Spec) (*resource.State, error) {
+	return nil, resource.ErrImmutable
+}
+func (f *orderedFake) Delete(context.Context, resource.Ref) error {
+	*f.order = append(*f.order, f.label)
+	return nil
+}
+
+// --- a phase failure must not stop later phases ---
+
+func TestDestroy_PhaseFailureDoesNotStopLaterPhases(t *testing.T) {
+	compute := newFakeResource()
+	compute.deleteErr = errors.New("compute delete boom")
+	storage := newFakeResource()
+	db := newFakeResource()
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "neon", Type: "branch", Capability: "database",
+			Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db},
+		resource.Registration{Provider: "cf", Type: "kv", Capability: "keyvalue",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: storage},
+		resource.Registration{Provider: "cf", Type: "worker", Capability: "compute",
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange),
+		action("api", "CACHE", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange),
+		action("api", "api", "cf", "worker", resource.PhaseCompute, plan.ActionNoChange),
+	}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if r := findResult(t, result, "api-api"); r.Outcome != OutcomeFailed {
+		t.Errorf("compute outcome = %v, want OutcomeFailed", r.Outcome)
+	}
+	// The critical assertion: storage and database still ran, unlike
+	// apply's cross-phase gate — see the package doc.
+	if r := findResult(t, result, "api-CACHE"); r.Outcome != OutcomeDeleted {
+		t.Errorf("storage outcome = %v, want OutcomeDeleted: a failed compute phase must not stop storage", r.Outcome)
+	}
+	if r := findResult(t, result, "api-DB"); r.Outcome != OutcomeDeleted {
+		t.Errorf("database outcome = %v, want OutcomeDeleted: a failed compute phase must not stop database", r.Outcome)
+	}
+	if storage.deleteCalls != 1 || db.deleteCalls != 1 {
+		t.Errorf("storage.deleteCalls=%d db.deleteCalls=%d, want 1 each", storage.deleteCalls, db.deleteCalls)
+	}
+	if !result.HasFailures() {
+		t.Errorf("HasFailures() = false, want true")
+	}
+}
+
+// --- siblings survive one failure within a phase ---
+
+func TestDestroy_SiblingsSurviveOneFailure(t *testing.T) {
+	ok := newFakeResource()
+	bad := newFakeResource()
+	bad.deleteErr = errors.New("boom")
+
+	reg := newRegistry(t,
+		resource.Registration{Provider: "cf", Type: "kv", Capability: "keyvalue",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: ok},
+		resource.Registration{Provider: "cf", Type: "queue", Capability: "queues",
+			Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: bad},
+	)
+
+	p := &plan.Plan{Actions: []plan.Action{
+		action("api", "OK", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange),
+		action("api", "BAD", "cf", "queue", resource.PhaseStorage, plan.ActionNoChange),
+	}}
+
+	result, err := New(reg).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if r := findResult(t, result, "api-OK"); r.Outcome != OutcomeDeleted {
+		t.Errorf("api-OK outcome = %v, want OutcomeDeleted: one sibling's failure must not affect the other", r.Outcome)
+	}
+	if r := findResult(t, result, "api-BAD"); r.Outcome != OutcomeFailed {
+		t.Errorf("api-BAD outcome = %v, want OutcomeFailed", r.Outcome)
+	}
+	if ok.deleteCalls != 1 {
+		t.Errorf("ok.deleteCalls = %d, want 1", ok.deleteCalls)
+	}
+}
+
+// --- bounded concurrency ---
+
+func TestDestroy_ConcurrencyBounded(t *testing.T) {
+	const n = 12
+	const limit = 3
+
+	f := newFakeResource()
+	f.delay = 20 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "cf", Type: "kv", Capability: "keyvalue",
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: f,
+	})
+
+	var actions []plan.Action
+	for i := 0; i < n; i++ {
+		actions = append(actions, action("api", bindingName(i), "cf", "kv", resource.PhaseStorage, plan.ActionNoChange))
+	}
+	p := &plan.Plan{Actions: actions}
+
+	result, err := New(reg, WithConcurrency(limit)).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if len(result.Results) != n {
+		t.Fatalf("len(Results) = %d, want %d", len(result.Results), n)
+	}
+	if f.maxInFlight > limit {
+		t.Fatalf("maxInFlight = %d, want <= %d: the concurrency limit did not bound parallelism", f.maxInFlight, limit)
+	}
+	if f.maxInFlight < 2 {
+		t.Fatalf("maxInFlight = %d, want >= 2: actions ran serially instead of concurrently", f.maxInFlight)
+	}
+}
+
+func bindingName(i int) string {
+	return fmt.Sprintf("BINDING%d", i)
+}
+
+func TestWithConcurrency_IgnoresNonPositive(t *testing.T) {
+	d := New(resource.NewRegistry(), WithConcurrency(0))
+	if d.concurrency != defaultConcurrency {
+		t.Fatalf("concurrency = %d, want default %d for a non-positive override", d.concurrency, defaultConcurrency)
+	}
+	d = New(resource.NewRegistry(), WithConcurrency(-5))
+	if d.concurrency != defaultConcurrency {
+		t.Fatalf("concurrency = %d, want default %d for a negative override", d.concurrency, defaultConcurrency)
+	}
+	d = New(resource.NewRegistry(), WithConcurrency(4))
+	if d.concurrency != 4 {
+		t.Fatalf("concurrency = %d, want 4", d.concurrency)
+	}
+}
+
+// --- context cancellation ---
+
+func TestDestroy_ContextCancelled_ReturnsErrorNotResult(t *testing.T) {
+	db := newFakeResource()
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByName, Resource: db,
+	})
+	act := action("api", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange)
+	p := &plan.Plan{Actions: []plan.Action{act}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before Destroy is even called
+
+	result, err := New(reg).Destroy(ctx, p)
+	if result != nil {
+		t.Errorf("result = %+v, want nil for a cancelled run", result)
+	}
+	requireCode(t, err, kerrors.CodeUnexpected)
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error = %q, want it to mention cancellation", err.Error())
+	}
+}
+
+func TestDestroy_ContextCancelledMidRun_DeleteObservesCancellation(t *testing.T) {
+	f := newFakeResource()
+	f.delay = 50 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "cf", Type: "kv", Capability: "keyvalue",
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: f,
+	})
+	act := action("api", "CACHE", "cf", "kv", resource.PhaseStorage, plan.ActionNoChange)
+	p := &plan.Plan{Actions: []plan.Action{act}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := New(reg).Destroy(ctx, p)
+	if result != nil {
+		t.Errorf("result = %+v, want nil: the context was cancelled during the run", result)
+	}
+	requireCode(t, err, kerrors.CodeUnexpected)
+}
+
+// --- reversedPhases ---
+
+func TestReversedPhases(t *testing.T) {
+	got := reversedPhases()
+	want := []resource.Phase{resource.PhaseCompute, resource.PhaseStorage, resource.PhaseDatabase}
+	if len(got) != len(want) {
+		t.Fatalf("reversedPhases() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("reversedPhases() = %v, want %v", got, want)
+		}
+	}
+}
+
+// --- Outcome / Result ---
+
+func TestOutcome_String(t *testing.T) {
+	cases := map[Outcome]string{
+		OutcomeDeleted: "deleted",
+		OutcomeSkipped: "skipped",
+		OutcomeFailed:  "failed",
+		Outcome(99):    "Outcome(99)",
+	}
+	for outcome, want := range cases {
+		if got := outcome.String(); got != want {
+			t.Errorf("Outcome(%d).String() = %q, want %q", outcome, got, want)
+		}
+	}
+}
+
+func TestResult_HasFailures(t *testing.T) {
+	var nilResult *Result
+	if nilResult.HasFailures() {
+		t.Errorf("nil Result.HasFailures() = true, want false")
+	}
+
+	skippedOnly := &Result{Results: []ActionResult{{Outcome: OutcomeSkipped}, {Outcome: OutcomeDeleted}}}
+	if skippedOnly.HasFailures() {
+		t.Errorf("HasFailures() = true for skipped/deleted only, want false")
+	}
+
+	withFailure := &Result{Results: []ActionResult{{Outcome: OutcomeDeleted}, {Outcome: OutcomeFailed}}}
+	if !withFailure.HasFailures() {
+		t.Errorf("HasFailures() = false, want true")
+	}
+}

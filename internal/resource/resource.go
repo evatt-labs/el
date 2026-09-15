@@ -17,11 +17,13 @@
 // # Identity is never stored
 //
 // A Ref is derived from the manifest on every command (D7). kraai persists no
-// resource ids: the lockfile records what was created so teardown can find it
-// again, but the authoritative answer to "does this exist" is always a fresh
-// lookup. How that lookup is performed varies per type, which is why a
-// registration declares its Lookup strategy (D26) rather than the package
-// assuming one rule holds everywhere.
+// resource ids: teardown (internal/destroy) is manifest-driven, not
+// lockfile-driven — it reuses the same *plan.Plan apply would, resolving
+// each planned action's resource straight from this registry by Ref.Key(),
+// the same way apply does (D6). The authoritative answer to "does this
+// exist" is always a fresh lookup. How that lookup is performed varies per
+// type, which is why a registration declares its Lookup strategy (D26)
+// rather than the package assuming one rule holds everywhere.
 package resource
 
 import (
