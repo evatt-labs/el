@@ -138,3 +138,61 @@ func (i *instrumented) Delete(ctx context.Context, ref Ref) error {
 		return i.inner.Delete(ctx, ref)
 	})
 }
+
+// The decorator forwards the optional interfaces a resource type may
+// implement, as well as the four required verbs.
+//
+// This is not cosmetic. Instrument is applied to every registration by
+// internal/assemble, so in a real run nothing downstream ever holds an
+// undecorated Resource — it holds an *instrumented. A caller asking "does
+// this resource also implement SecretProducer" is therefore asking about
+// *instrumented, not about the type that actually implements it, and
+// before these methods existed the answer was always no. Two shipped
+// behaviours were silently dead as a result: plan could never emit
+// ActionReplace (internal/plan's decide type-asserts ImmutableDiffer), and
+// apply's credential handoff resolved nothing (internal/apply type-asserts
+// SecretProducer), in both cases only under the decorator that production
+// always applies and no test used.
+//
+// Forwarding unconditionally rather than building a struct variant per
+// combination of implemented interfaces is safe here because each method's
+// not-implemented answer is indistinguishable from the type not
+// implementing the interface at all: no secrets, and no immutable
+// difference. The cost is that a type assertion against *instrumented no
+// longer carries information — which is precisely why the guard test in
+// otel_test.go exists.
+//
+// HAZARD: an optional interface added to this package in future MUST get a
+// forwarder here and an entry in TestInstrumentedForwardsOptionalInterfaces,
+// or it will be silently dropped in production exactly as these two were.
+// That test can prove the interfaces it knows about are forwarded; nothing
+// mechanical can notice an interface nobody told it about.
+
+// Secrets forwards to the inner resource when it is a SecretProducer, and
+// otherwise reports that this resource produces no credentials — the same
+// answer a caller gets from a type that does not implement SecretProducer.
+func (i *instrumented) Secrets(state *State) map[string]Secret {
+	producer, ok := i.inner.(SecretProducer)
+	if !ok {
+		return nil
+	}
+	return producer.Secrets(state)
+}
+
+// DiffersFromState forwards to the inner resource when it can answer, and
+// otherwise reports no difference — the same answer a caller gets from a
+// type that does not implement the interface.
+//
+// The interface is spelled out structurally rather than imported: it is
+// declared in internal/plan, which imports this package, so naming
+// plan.ImmutableDiffer here would be an import cycle. internal/provider/aws
+// satisfies it the same way, for the same reason.
+func (i *instrumented) DiffersFromState(spec Spec, state *State) (bool, error) {
+	differ, ok := i.inner.(interface {
+		DiffersFromState(Spec, *State) (bool, error)
+	})
+	if !ok {
+		return false, nil
+	}
+	return differ.DiffersFromState(spec, state)
+}
