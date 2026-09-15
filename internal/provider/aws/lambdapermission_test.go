@@ -77,7 +77,7 @@ func TestAPIGatewaySourceARN(t *testing.T) {
 		if err != nil {
 			t.Fatalf("apiGatewaySourceARN: %v", err)
 		}
-		want := "arn:aws:execute-api:us-east-1:123456789012:abc123/*/*/*"
+		want := "arn:aws:execute-api:us-east-1:123456789012:abc123/*/*"
 		if arn != want {
 			t.Fatalf("arn = %q, want %q", arn, want)
 		}
@@ -162,7 +162,7 @@ func TestLambdaPermissionCreateForAPIGateway(t *testing.T) {
 	if desired["Principal"] != "apigateway.amazonaws.com" {
 		t.Errorf("Principal = %v", desired["Principal"])
 	}
-	want := "arn:aws:execute-api:us-east-1:123456789012:abc123/*/*/*"
+	want := "arn:aws:execute-api:us-east-1:123456789012:abc123/*/*"
 	if desired["SourceArn"] != want {
 		t.Errorf("SourceArn = %v, want %q", desired["SourceArn"], want)
 	}
