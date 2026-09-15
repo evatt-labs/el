@@ -51,20 +51,49 @@ func TestWarmCallOverheadBudget(t *testing.T) {
 		}
 	}
 
-	const iterations = 20_000
-	start := time.Now()
-	for i := 0; i < iterations; i++ {
-		if _, err := fn.Call(ctx); err != nil {
-			t.Fatalf("call %d: %v", i, err)
+	// Repeat the measurement and keep the fastest sample rather than
+	// trusting a single wall-clock reading.
+	//
+	// This is a latency floor, and contention is strictly additive: another
+	// package's tests running in parallel under `go test ./...`, or the race
+	// detector's own overhead, can only ever make a sample slower, never
+	// faster. The minimum across repeats is therefore the closest estimate
+	// of the real per-call cost available without pinning a CPU, while the
+	// mean or a single reading measures whatever else the machine happened
+	// to be doing.
+	//
+	// This matters concretely: as a single measurement this test reported
+	// 426ns/call in isolation and 6.7us/call inside a loaded `-race` suite
+	// run — a 15x spread on unchanged code — and failed the budget purely
+	// because another package had started issuing concurrent HTTP requests.
+	// A gate that fails on unrelated load is not a regression signal, it is
+	// noise that trains readers to ignore it.
+	const (
+		iterations = 20_000
+		repeats    = 5
+	)
+	best := time.Duration(1<<63 - 1)
+	samples := make([]time.Duration, 0, repeats)
+	for r := 0; r < repeats; r++ {
+		start := time.Now()
+		for i := 0; i < iterations; i++ {
+			if _, err := fn.Call(ctx); err != nil {
+				t.Fatalf("repeat %d call %d: %v", r, i, err)
+			}
+		}
+		perCall := time.Since(start) / time.Duration(iterations)
+		samples = append(samples, perCall)
+		if perCall < best {
+			best = perCall
 		}
 	}
-	elapsed := time.Since(start)
-	perCall := elapsed / time.Duration(iterations)
-	t.Logf("warm call overhead: %s/call over %d iterations", perCall, iterations)
+	t.Logf("warm call overhead: best %s/call over %d iterations x %d repeats (samples: %v)",
+		best, iterations, repeats, samples)
 
 	const budget = 5 * time.Microsecond
-	if perCall > budget {
-		t.Fatalf("warm call overhead %s/call exceeds the %s regression budget", perCall, budget)
+	if best > budget {
+		t.Fatalf("warm call overhead %s/call (best of %d) exceeds the %s regression budget",
+			best, repeats, budget)
 	}
 }
 
