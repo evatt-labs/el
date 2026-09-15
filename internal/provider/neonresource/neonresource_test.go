@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evatt-labs/kraai/internal/manifest"
 	"github.com/evatt-labs/kraai/internal/provider/cloudflare"
@@ -47,10 +48,24 @@ func settings() BranchSettings {
 }
 
 // neonClient serves the project and branch endpoints a branch adapter walks.
+//
+// WithRetryTimings is set to millisecond bounds rather than
+// neon.Client's production defaults (up to a 2-minute retry ceiling per
+// call — see internal/provider/neon/client.go). Several tests in this
+// file deliberately return error statuses to exercise this package's
+// error-propagation paths; several of those statuses (423, 429, and 5xx
+// for idempotent calls) are exactly what neon.Client now retries. Without
+// this, a single such test would spend up to two real minutes retrying a
+// failure it wants to observe immediately — this package's own suite took
+// over 480s under -race before this override was added, almost entirely
+// spent in that retry loop.
 func neonClient(t *testing.T, handler func(call) (int, string)) (*neon.Client, *[]call) {
 	t.Helper()
 	srv, seen := fakeAPI(t, handler)
-	return neon.New("key", neon.WithBaseURL(srv.URL), neon.WithHTTPClient(srv.Client())), seen
+	return neon.New("key",
+		neon.WithBaseURL(srv.URL), neon.WithHTTPClient(srv.Client()),
+		neon.WithRetryTimings(time.Millisecond, 2*time.Millisecond, 20*time.Millisecond),
+	), seen
 }
 
 func cfClient(t *testing.T, handler func(call) (int, string)) (*cloudflare.Client, *[]call) {
