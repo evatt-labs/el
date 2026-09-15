@@ -40,7 +40,13 @@ func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, setting
 			// First: everything that binds to a database needs it to exist.
 			Phase: resource.PhaseDatabase,
 			// Listed and matched on branch name within the project.
-			Lookup:   resource.LookupByAttr,
+			Lookup: resource.LookupByAttr,
+			// Neon serializes mutations per project, not by request rate
+			// — see resource.Registration.Scope's doc comment for the
+			// live 423 two branches on one project produced. See
+			// newBranchScope's own doc comment for why this closes over
+			// settings.Project/OrgID rather than reading Spec.Config.
+			Scope:    newBranchScope(settings),
 			Resource: &branchResource{client: neonClient, settings: settings},
 		},
 	}

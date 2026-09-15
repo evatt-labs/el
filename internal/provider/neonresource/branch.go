@@ -111,6 +111,41 @@ func str(config map[string]any, key string) string {
 	return v
 }
 
+// newBranchScope builds the Registration.Scope function for the Neon
+// branch type: every branch Create/Delete this registration's
+// branchResource performs resolves the same project, via resolveProject,
+// using settings.Project and settings.OrgID — the same two values folded
+// into the scope key here, so operations against that project (and only
+// that project) are serialized against each other.
+//
+// # Why a closure over settings, not a read from Spec
+//
+// The illustrative shape in this workstream's brief reads the project
+// "from spec" — but nothing in a database binding's Spec.Config carries
+// one today: internal/plan/planner.go's expandBinding builds a database
+// binding's Config from only {driver, caching} (see its Plan method), and
+// a Neon project is provider-level configuration instead —
+// BranchSettings, decoded once in internal/assemble/assemble.go from
+// kraai.yaml's `providers.neon` block and passed to every branchResource
+// this package registers. There is exactly one Neon project per kraai
+// invocation today, which is also exactly why the discovered bug is
+// possible at all: every service's database binding, from every
+// registration this file produces, already shares one project by
+// construction, so any two of them racing is the whole failure mode.
+//
+// The returned function still has Registration.Scope's exact signature —
+// func(resource.Spec) string — and Spec is a real parameter, deliberately
+// ignored: if a future manifest schema lets one binding choose its own
+// Neon project independent of the environment's default, that per-binding
+// value would have to travel through Spec.Config (mirroring how "driver"
+// and "caching" already do), and this closure is the one place that would
+// change to start reading it — the Scope mechanism itself needs no
+// changes to support that, since it already takes a Spec per call.
+func newBranchScope(settings BranchSettings) func(resource.Spec) string {
+	scope := "neon:project:" + settings.OrgID + "/" + settings.Project
+	return func(resource.Spec) string { return scope }
+}
+
 // branchResource provisions a Neon branch per environment.
 //
 // A branch is a copy-on-write fork of the parent's data with its own compute
