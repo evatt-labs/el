@@ -1,0 +1,204 @@
+package aws
+
+import (
+	"context"
+
+	"github.com/evatt-labs/kraai/internal/kerrors"
+	"github.com/evatt-labs/kraai/internal/resource"
+)
+
+// artifactObjectKey derives the deterministic S3 key a service's packaged
+// artifact is stored under: {serviceName}/{sha256}.zip. Content-addressed
+// rather than a fixed "latest.zip"-style key so two applies of identical
+// source produce the identical key — the same object, no upload, no Code
+// diff — while any real code change produces a new key and, downstream, a
+// visible Lambda code update.
+func artifactObjectKey(serviceName, sha256Hex string) string {
+	return serviceName + "/" + sha256Hex + ".zip"
+}
+
+// lambdaFunctionResource provisions a service's Lambda function: packaging
+// its deployment artifact, uploading it to the per-service artifact bucket,
+// and wiring its execution role, environment and Web Adapter layer before
+// delegating to the generic Cloud Control engine.
+//
+// # Why packaging lives in a wrapper, not the generic engine
+//
+// resourceType (resource.go) submits Spec.Config as Cloud Control's desired
+// state directly — correct for a binding capability's resources, where
+// internal/plan's expandBinding already builds a type-appropriate Config
+// per registration. expandCompute (out of scope, unchanged by this
+// workstream) builds one generic Config per service — {dir, settings,
+// trigger, handler, schedule} — shared across every Tier 1/2 compute
+// registration for that service, not a Lambda::Function property map. This
+// type (and every other Tier 2 type in this package) translates that
+// generic shape into its own real Cloud Control properties before
+// delegating; "no new engine work" (the brief's own scope line) means
+// resource.go's polling/patch/schema-diff mechanics stay untouched, not
+// that every registration can skip translation.
+//
+// # Why plan-time and apply-time packaging are split
+//
+// Building the deployment zip is pure local file I/O — safe to do during
+// `kraai plan`, which only ever calls Get and, where implemented,
+// DiffersFromState (internal/plan narrows every resource.Resource to a
+// getter, see that package's own doc). Uploading the built artifact to S3
+// is not safe there: `kraai plan` must never mutate anything, and
+// DiffersFromState's signature carries no context to run a network call
+// under cleanly regardless. So DiffersFromState here (see its own doc
+// comment) never builds or uploads an artifact at all — it only ever
+// checks FunctionName, this type's sole createOnlyProperty — and the real
+// packaging-plus-upload sequence runs exclusively inside Create/Update,
+// which only `kraai apply` ever calls.
+type lambdaFunctionResource struct {
+	inner  *resourceType
+	client *Client
+}
+
+func newLambdaFunctionResource(client *Client) *lambdaFunctionResource {
+	return &lambdaFunctionResource{
+		inner:  &resourceType{provider: Provider, typeName: TypeLambdaFunction, lookup: resource.LookupByName, client: client},
+		client: client,
+	}
+}
+
+// translate packages the service's artifact, uploads it, resolves its
+// execution role's ARN and its environment (literal and secret-sourced),
+// and builds the real AWS::Lambda::Function desired state. Every step here
+// either performs local I/O (packaging) or a network call this method's
+// ctx already carries — nothing here can run during `kraai plan`, only
+// `kraai apply`'s Create/Update.
+func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Spec) (resource.Spec, error) {
+	dir, _ := spec.Config["dir"].(string)
+	if dir == "" {
+		return resource.Spec{}, kerrors.Validation("binding %q declares no dir to package", spec.Binding)
+	}
+	handler, _ := spec.Config["handler"].(string)
+	if handler == "" {
+		return resource.Spec{}, kerrors.Validation("binding %q declares no compute.handler", spec.Binding)
+	}
+
+	settingsMap, _ := spec.Config["settings"].(map[string]any)
+	lambdaSettings, err := decodeLambdaSettings(settingsMap)
+	if err != nil {
+		return resource.Spec{}, err
+	}
+
+	data, sha256Hex, err := buildArtifact(dir)
+	if err != nil {
+		return resource.Spec{}, err
+	}
+	bucket := artifactBucketName(spec.Name)
+	key := artifactObjectKey(spec.Name, sha256Hex)
+	if err := l.client.PutObject(ctx, bucket, key, data); err != nil {
+		return resource.Spec{}, err
+	}
+
+	account, err := l.client.AccountID(ctx)
+	if err != nil {
+		return resource.Spec{}, err
+	}
+	// The execution role's own real name is spec.Name — the same derived
+	// name every Tier 2 registration for this service shares (iamrole.go
+	// sets RoleName to exactly this) — so its ARN is constructed the same
+	// way eventsrule.go constructs the function's own, and for the
+	// identical reason: no live lookup, no same-phase ordering risk.
+	execRoleARN := roleARN(account, spec.Name)
+
+	env, err := resolveEnv(ctx, spec, lambdaSettings)
+	if err != nil {
+		return resource.Spec{}, err
+	}
+
+	translated := spec
+	translated.Config = map[string]any{
+		"FunctionName": spec.Name,
+		"PackageType":  "Zip",
+		"Code": map[string]any{
+			"S3Bucket": bucket,
+			"S3Key":    key,
+		},
+		"Handler":       handler,
+		"Runtime":       lambdaSettings.Runtime,
+		"Architectures": []any{lambdaSettings.Architecture},
+		"MemorySize":    lambdaSettings.MemorySize,
+		"Timeout":       lambdaSettings.Timeout,
+		"Role":          execRoleARN,
+		"Layers":        []any{lambdaSettings.LayerArn},
+		"Environment": map[string]any{
+			"Variables": env,
+		},
+	}
+	return translated, nil
+}
+
+// resolveEnv builds the function's environment variables: settings.Env
+// passed through verbatim, plus settings.EnvSecrets resolved through
+// spec.Secret at the point of use — the credential contract this package
+// is written against (see the compute_settings.go LambdaSettings.EnvSecrets
+// doc comment for the namespacing rule and why no binding name is ever
+// hardcoded here).
+func resolveEnv(ctx context.Context, spec resource.Spec, settings LambdaSettings) (map[string]any, error) {
+	env := make(map[string]any, len(settings.Env)+len(settings.EnvSecrets))
+	for k, v := range settings.Env {
+		env[k] = v
+	}
+	for envVar, secretKey := range settings.EnvSecrets {
+		value, err := spec.Secret(ctx, secretKey)
+		if err != nil {
+			return nil, kerrors.Wrap(err, kerrors.CodeValidation,
+				"resolving %q for environment variable %q", secretKey, envVar)
+		}
+		env[envVar] = value
+	}
+	return env, nil
+}
+
+func (l *lambdaFunctionResource) Get(ctx context.Context, ref resource.Ref) (*resource.State, error) {
+	return l.inner.Get(ctx, ref)
+}
+
+func (l *lambdaFunctionResource) Create(ctx context.Context, spec resource.Spec) (*resource.State, error) {
+	translated, err := l.translate(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return l.inner.Create(ctx, translated)
+}
+
+func (l *lambdaFunctionResource) Update(ctx context.Context, ref resource.Ref, spec resource.Spec) (*resource.State, error) {
+	translated, err := l.translate(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return l.inner.Update(ctx, ref, translated)
+}
+
+func (l *lambdaFunctionResource) Delete(ctx context.Context, ref resource.Ref) error {
+	return l.inner.Delete(ctx, ref)
+}
+
+// DiffersFromState checks only FunctionName, this type's sole
+// createOnlyProperty per D26 (docs/BLUEPRINT.md and this package's own
+// register.go: "FunctionName is settable at create; CloudFormation marks
+// it 'Update requires: Replacement'"). See this type's own doc comment for
+// why the real translate — packaging, upload, secret resolution — never
+// runs here.
+//
+// It does still decode and validate the merged settings first, even though
+// the diff itself never uses them: decodeLambdaSettings is pure (no I/O),
+// and it is the one thing every compute service reaches unconditionally —
+// this is where an invalid httpFrontDoor setting surfaces as a `kraai plan`
+// failure instead of both HTTP front-door registrations silently selecting
+// neither (see compute_settings.go's own comment on httpFrontDoorIs for why
+// SelectedBy itself cannot report that error).
+func (l *lambdaFunctionResource) DiffersFromState(spec resource.Spec, state *resource.State) (bool, error) {
+	settingsMap, _ := spec.Config["settings"].(map[string]any)
+	if _, err := decodeLambdaSettings(settingsMap); err != nil {
+		return false, err
+	}
+
+	nameOnly := spec
+	nameOnly.Config = map[string]any{"FunctionName": spec.Name}
+	return l.inner.DiffersFromState(nameOnly, state)
+}

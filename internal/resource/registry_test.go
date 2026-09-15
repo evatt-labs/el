@@ -439,3 +439,33 @@ func TestAppliesToTrigger(t *testing.T) {
 		})
 	}
 }
+
+// TestAppliesToSettings pins the mutual-exclusivity gate SelectedBy exists
+// for: nil always matches (a registration with no opinion on settings),
+// and a non-nil closure decides per the settings map it is handed.
+func TestAppliesToSettings(t *testing.T) {
+	t.Run("nil SelectedBy always applies", func(t *testing.T) {
+		reg := Registration{}
+		if !reg.AppliesToSettings(map[string]any{"anything": "at all"}) {
+			t.Fatal("AppliesToSettings with nil SelectedBy = false, want true")
+		}
+		if !reg.AppliesToSettings(nil) {
+			t.Fatal("AppliesToSettings(nil) with nil SelectedBy = false, want true")
+		}
+	})
+
+	t.Run("a non-nil SelectedBy decides", func(t *testing.T) {
+		reg := Registration{
+			SelectedBy: func(settings map[string]any) bool { return settings["frontDoor"] == "url" },
+		}
+		if !reg.AppliesToSettings(map[string]any{"frontDoor": "url"}) {
+			t.Error("expected a match for frontDoor=url")
+		}
+		if reg.AppliesToSettings(map[string]any{"frontDoor": "apigateway"}) {
+			t.Error("expected no match for frontDoor=apigateway")
+		}
+		if reg.AppliesToSettings(nil) {
+			t.Error("expected no match for a nil settings map")
+		}
+	})
+}

@@ -469,26 +469,71 @@ workstreams:
 
   - id: aws-provider-compute
     title: AWS provider Tier 2 — Lambda/API resources (only if kraai-api exists)
-    status: proposed
+    status: done
     depends: [aws-provider-core]
     decisions: [D24]
     scope:
       - >-
         Register Tier 2 resource types on the generic engine built in
         `aws-provider-core`: `AWS::Lambda::Function`, `AWS::Lambda::Url`,
-        `AWS::IAM::Role`, `AWS::SSM::Parameter`,
-        `AWS::Events::Rule`/Scheduler. No new engine work — per-type
-        registration plus schema-derived validation only.
+        `AWS::IAM::Role`, `AWS::Events::Rule` (chosen over EventBridge
+        Scheduler — see the PR description), and `AWS::Lambda::Permission`
+        (added during review: without it, neither the schedule rule nor
+        the API Gateway can actually invoke the function). No new engine
+        work — per-type registration plus schema-derived validation only.
+        `AWS::SSM::Parameter`, originally in this list, was dropped during
+        review: it had no concrete consumer and existed only to publish a
+        value nothing read (Rule 2 — simplicity first, nothing
+        speculative).
       - >-
         Lambda artifact packaging: zip plus the Lambda Web Adapter layer
-        (runs an unmodified FastAPI ASGI app, so a later move to Fargate is
-        a repackage rather than a rewrite), not a container image — no ECR
-        cost, faster cold start.
+        (runs an unmodified ASGI app, so a later move to Fargate is a
+        repackage rather than a rewrite), not a container image — no ECR
+        cost, faster cold start. A per-service S3 artifact bucket
+        (PhaseStorage, ahead of the function) holds the built zips;
+        determinism is enforced and tested directly.
+      - >-
+        A service's HTTP front door (API Gateway or a Lambda function URL)
+        is selected by a manifest-driven compute setting
+        (`httpFrontDoor`), validated against an explicit allow-list — a
+        service gets exactly one, never both (added during review, fixing
+        the same wrong-output bug class `per-service-compute` (#78)
+        eliminated for trigger gating).
+      - >-
+        `AWS::ApiGatewayV2::Api` (registered in `aws-provider-core`, before
+        this workstream) gained a real translate step, the same shape
+        every other Tier 2 type here already has: the bare generic engine
+        was submitting `expandCompute`'s generic compute config as this
+        type's Cloud Control properties, none of which are real properties
+        of `AWS::ApiGatewayV2::Api` — every create would have been
+        rejected. Fixed via the `Target` quick-create property (verified
+        against the live CloudFormation reference), which also wires the
+        Lambda integration/route/stage in one property — no separate
+        Integration/Route/Stage registrations needed. Found and fixed
+        during review, since this workstream's `httpFrontDoor` default
+        put API Gateway on the critical path for every unconfigured HTTP
+        service.
+      - >-
+        Review also surfaced and fixed the identical class of bug in this
+        workstream's own artifact-bucket wrapper (Create was never setting
+        `BucketName`, so every apply would have created a fresh,
+        differently-named bucket instead of finding the one from the last
+        apply) and audited every other registration in the package for the
+        same pattern. The five pre-existing `objects`-capability types
+        (`AWS::S3::Bucket`, `AWS::Route53::HostedZone`,
+        `AWS::CertificateManager::Certificate`,
+        `AWS::CloudFront::Distribution`, `AWS::Route53::RecordSet`, all
+        from `aws-provider-core`) have the same root cause —
+        `expandBinding` passes a nil `Spec.Config` for the `objects`
+        capability, so their bare `resourceType.Create` submits an empty
+        desired state — but were left unfixed here as out of this
+        workstream's scope; see the PR body for the full audit and the
+        follow-up this implies for `aws-provider-core`.
     blocked_on: >-
-      Whether kraai.dev has a hosted API at all. The business model is
-      explicitly undecided as of 2026-09-13; kraai may reduce to an OSS
-      product site, in which case this workstream is never built. Nothing
-      else depends on it.
+      Resolved: compute targets AWS Lambda (this workstream), so kraai.dev
+      does have a hosted-API shape as of this PR. Whether kraai.dev ships
+      one in production is still kraai-api's own call, not this
+      document's.
     acceptance:
       - >-
         Same two acceptance criteria as aws-provider-core, for the Tier 2
@@ -497,7 +542,10 @@ workstreams:
     smoke_notes: >-
       Only meaningful once kraai-api exists. kraai-api/docs/BLUEPRINT.md is
       stale and parked (it still documents Cloudflare Containers) — do not
-      build against it without revising it first.
+      build against it without revising it first. This PR ships no live
+      AWS smoke test (D21: no network, no AWS account in unit tests);
+      smoke verification against a real kraai-api manifest is left to
+      whoever builds kraai-api itself.
 
   - id: cloudflare-provider
     title: Built-in cloudflare provider — Worker, D1, KV, R2, Queues, Hyperdrive

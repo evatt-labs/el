@@ -1,0 +1,238 @@
+package aws
+
+import (
+	"context"
+	"strings"
+
+	"github.com/evatt-labs/kraai/internal/kerrors"
+	"github.com/evatt-labs/kraai/internal/resource"
+)
+
+// TypePermissionAPIGateway and TypePermissionEventsRule are this package's
+// own registry vocabulary, not real Cloud Control TypeNames — both drive
+// the identical real type, AWS::Lambda::Permission, via
+// resourceType.typeName, exactly as TypeArtifactBucket reuses
+// AWS::S3::Bucket under a different registry key (see that constant's own
+// doc comment for why: a provider/type pair can only be registered once,
+// and these are two functionally distinct grants on the same function,
+// each with its own identity and its own trigger gate).
+const (
+	TypePermissionAPIGateway = "AWS::Lambda::Permission::APIGateway"
+	TypePermissionEventsRule = "AWS::Lambda::Permission::EventsRule"
+
+	// realTypeLambdaPermission is the actual Cloud Control TypeName both
+	// registrations above drive.
+	realTypeLambdaPermission = "AWS::Lambda::Permission"
+)
+
+// permissionAction is the action every permission this package grants
+// authorizes: an invoke, never anything broader (AWS::Lambda::Permission's
+// own Action property also accepts lambda:GetFunction and similar, which
+// this package has no reason to grant).
+const permissionAction = "lambda:InvokeFunction"
+
+// sourceARNFunc resolves the SourceArn a permission's translate needs,
+// given the client (for AccountID/Region, or a live lookup) and the
+// action's own Spec. Two implementations exist: eventBridgeRuleSourceARN
+// (pure, no live lookup) and apiGatewaySourceARN (a live lookup — see its
+// own doc comment for the same-phase ordering gap this cannot avoid).
+type sourceARNFunc func(ctx context.Context, client *Client, spec resource.Spec) (string, error)
+
+// eventBridgeRuleSourceARN builds the invoking rule's ARN locally from the
+// account id, region and the rule's own derived name (spec.Name — the
+// EventBridge Rule registration is byName, D26, so this is exactly the
+// same name eventsrule.go's own Create submits as its Name property). No
+// live lookup: this is the same account-id-plus-region construction
+// eventsrule.go and lambda.go already use for the reverse direction
+// (function ARN, role ARN), for the identical reason — avoiding a
+// same-phase race with the resource it references, since Events::Rule and
+// this permission both run in PhaseCompute with no ordering guarantee
+// between them.
+func eventBridgeRuleSourceARN(ctx context.Context, client *Client, spec resource.Spec) (string, error) {
+	account, err := client.AccountID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return ruleARN(client.Region(), account, spec.Name), nil
+}
+
+// apiGatewaySourceARN resolves the fronting API Gateway's execute-api ARN.
+//
+// # Known gap: this is a live lookup with a real same-phase race
+//
+// Unlike an EventBridge rule or an IAM role, an ApiGatewayV2::Api's id is
+// not something kraai derives — it is assigned by AWS at creation and
+// cannot be constructed from the account id, region and a name the way
+// every other ARN in this package is (see arn.go). The only way to learn
+// it is to ask Cloud Control, via the identical byTag lookup
+// register.go's own ApiGatewayV2::Api registration uses.
+//
+// That lookup is not safely ordered: this permission and the API Gateway
+// it authorizes are both registered in PhaseCompute, which runs
+// concurrently under D12's two-level phase model with no guarantee the
+// gateway's own Create has completed by the time this one starts. This is
+// the same class of unsolved same-phase dependency register.go's own doc
+// comment already names for RecordSet/Certificate/CloudFront — surfaced
+// here rather than hidden behind a wildcarded SourceArn, which was
+// considered and rejected: AWS::Lambda::Permission's SourceArn is matched
+// with StringLike, so wildcarding the api-id segment (rather than only the
+// stage/method/path segments every example already wildcards) would grant
+// every API Gateway HTTP API in the account permission to invoke this
+// function, not only the one fronting it — a real, avoidable broadening of
+// what can invoke a given service's code for the sake of dodging a race
+// that resolves itself on retry.
+//
+// A first-ever `kraai apply` on a fresh environment can therefore fail
+// this one action with a clear, named error (never silently: the failure
+// is reported, not swallowed) if the gateway has not yet been created when
+// this permission's Create runs; a second `kraai apply` succeeds once it
+// has. This is a real usability cost, not a hidden one, and is flagged as
+// such in this workstream's PR description rather than deferred again.
+func apiGatewaySourceARN(ctx context.Context, client *Client, spec resource.Spec) (string, error) {
+	lookup := &resourceType{
+		provider: Provider, typeName: TypeAPIGatewayV2API, lookup: resource.LookupByTag,
+		client: client, match: apigatewayv2Match,
+	}
+	state, err := lookup.Get(ctx, resource.Ref{Name: spec.Name})
+	if err != nil {
+		return "", err
+	}
+	if state == nil {
+		return "", kerrors.Validation(
+			"no AWS::ApiGatewayV2::Api was found for %q yet — this Lambda::Permission depends on it "+
+				"existing first, and both are registered in the same phase with no ordering guarantee "+
+				"between them (see apiGatewaySourceARN's own doc comment); retry once the API Gateway "+
+				"has been created", spec.Name)
+	}
+
+	account, err := client.AccountID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return executeAPIArn(client.Region(), account, state.ID), nil
+}
+
+// lambdaPermissionResource grants principal permission to invoke a
+// service's function, scoped to sourceARN's result.
+type lambdaPermissionResource struct {
+	inner     *resourceType
+	client    *Client
+	principal string
+	sourceARN sourceARNFunc
+}
+
+func newLambdaPermissionResource(client *Client, principal string, sourceARN sourceARNFunc) *lambdaPermissionResource {
+	return &lambdaPermissionResource{
+		inner: &resourceType{
+			provider: Provider, typeName: realTypeLambdaPermission, lookup: resource.LookupByAttr,
+			client: client, match: lambdaPermissionMatch,
+		},
+		client:    client,
+		principal: principal,
+		sourceARN: sourceARN,
+	}
+}
+
+func (p *lambdaPermissionResource) translate(ctx context.Context, spec resource.Spec) (resource.Spec, error) {
+	arn, err := p.sourceARN(ctx, p.client, spec)
+	if err != nil {
+		return resource.Spec{}, err
+	}
+
+	translated := spec
+	translated.Config = map[string]any{
+		"Action":       permissionAction,
+		"FunctionName": spec.Name,
+		"Principal":    p.principal,
+		"SourceArn":    arn,
+	}
+	return translated, nil
+}
+
+func (p *lambdaPermissionResource) Get(ctx context.Context, ref resource.Ref) (*resource.State, error) {
+	return p.inner.Get(ctx, ref)
+}
+
+func (p *lambdaPermissionResource) Create(ctx context.Context, spec resource.Spec) (*resource.State, error) {
+	translated, err := p.translate(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return p.inner.Create(ctx, translated)
+}
+
+func (p *lambdaPermissionResource) Update(ctx context.Context, ref resource.Ref, spec resource.Spec) (*resource.State, error) {
+	translated, err := p.translate(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return p.inner.Update(ctx, ref, translated)
+}
+
+func (p *lambdaPermissionResource) Delete(ctx context.Context, ref resource.Ref) error {
+	return p.inner.Delete(ctx, ref)
+}
+
+// DiffersFromState checks FunctionName and Principal only — never
+// SourceArn, which needs either a cached-but-still-live AccountID call
+// (the EventBridge variant) or a live cross-resource lookup with the same
+// race apiGatewaySourceARN's own doc comment describes (the API Gateway
+// variant). Every property AWS::Lambda::Permission declares is "Update
+// requires: Replacement" per its own CloudFormation reference — there is
+// no in-place update path for this type at all, so a difference in
+// anything this method can see without I/O is already enough to signal a
+// replacement is needed; SourceArn changing without FunctionName or
+// Principal changing is not a case kraai's own usage of this type can
+// produce (both are derived from the same service name and never change
+// independently of it).
+func (p *lambdaPermissionResource) DiffersFromState(spec resource.Spec, state *resource.State) (bool, error) {
+	partial := spec
+	partial.Config = map[string]any{
+		"FunctionName": spec.Name,
+		"Principal":    p.principal,
+	}
+	return p.inner.DiffersFromState(partial, state)
+}
+
+// lambdaPermissionMatch implements AWS::Lambda::Permission's LookupByAttr
+// strategy.
+//
+// # Why byAttr, not byTag
+//
+// AWS::Lambda::Permission's own CloudFormation properties (Action,
+// EventSourceToken, FunctionName, FunctionUrlAuthType,
+// InvokedViaFunctionUrl, Principal, PrincipalOrgID, SourceAccount,
+// SourceArn) include no Tags property at all — the same gap Lambda::Url
+// has (see lambdaURLMatch's own doc comment), so byTag is unavailable here
+// for the identical reason.
+//
+// Matching on FunctionName alone is safe within the scope each of this
+// package's two registrations actually uses it at: register.go creates at
+// most one events.amazonaws.com permission and at most one
+// apigateway.amazonaws.com permission per service, each under its own
+// registry key (TypePermissionEventsRule, TypePermissionAPIGateway) and
+// therefore its own independent ListResources walk — never two permissions
+// for the same principal on the same function competing for one match.
+// AWS::Lambda::Permission does allow many permissions per function across
+// different principals in general (that is the whole point of the type),
+// but that generality is not what this package's own usage produces.
+//
+// # Known gap: bare-name-versus-ARN comparison is unverified against a live account
+//
+// Exactly the same unverified assumption lambdaURLMatch already carries
+// and documents: this package always writes FunctionName as spec.Name (a
+// bare function name, per AWS::Lambda::Permission's own documented "Name
+// formats" accepting one), but whether Cloud Control's GetResource echoes
+// that back unchanged or normalises it to a full ARN has not been
+// independently verified against a live account. Handled defensively here
+// the same way, and flagged rather than assumed correct.
+func lambdaPermissionMatch(properties map[string]any, name string) bool {
+	fn, _ := properties["FunctionName"].(string)
+	if fn == "" {
+		return false
+	}
+	if fn == name {
+		return true
+	}
+	return strings.HasSuffix(fn, ":function:"+name)
+}

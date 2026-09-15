@@ -21,6 +21,12 @@ const (
 	TypeRoute53RecordSet              = "AWS::Route53::RecordSet"
 )
 
+// Tier 2 compute types (aws-provider-compute): what it takes to actually run
+// a deployed Lambda, beyond the function and its HTTP front door registered
+// above. TypeArtifactBucket is this package's own registry vocabulary, not
+// a real Cloud Control TypeName — see its own doc comment in
+// artifactbucket.go for why.
+
 // Register adds every type in this package to reg.
 func Register(reg *resource.Registry, client *Client) error {
 	for _, r := range Registrations(client) {
@@ -160,15 +166,115 @@ func Registrations(client *Client) []resource.Registration {
 			// No Triggers restriction: every service with AWS compute gets
 			// a Lambda function regardless of how it's invoked — an HTTP
 			// handler and a scheduled handler are both, in the end, a
-			// function. What differs between them (the API Gateway in
-			// front, or not) is the other registration below.
+			// function. What differs between them (the API Gateway/Url in
+			// front, or the schedule rule behind it) is the other
+			// registrations in this list.
 			//
 			// FunctionName is settable at create; CloudFormation marks it
 			// "Update requires: Replacement", i.e. a createOnlyProperty and
 			// this type's Ref (aws-resource-lambda-function.html) — D7's
 			// derivable-name assumption holds.
+			//
+			// Resource is newLambdaFunctionResource, not a plain
+			// resourceType: this is where a deployment package actually
+			// gets built and uploaded (lambda.go) before Cloud Control ever
+			// sees a Code property. See lambda.go's own doc comment.
 			Lookup:   resource.LookupByName,
-			Resource: &resourceType{provider: Provider, typeName: TypeLambdaFunction, lookup: resource.LookupByName, client: client},
+			Resource: newLambdaFunctionResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeArtifactBucket,
+			Capability: manifest.CapabilityCompute,
+			// Ahead of the function in PhaseCompute that uploads its
+			// artifact there — phase-as-ordering, not phase-as-category,
+			// the same technique and the same caveat PR #75 already
+			// documented for ACM validation records and the
+			// S3/CloudFront pair above: D12's two-level phase model has no
+			// finer-grained dependency expression than "which phase," so
+			// "before the function" is expressed by placing this in the
+			// phase before PhaseCompute rather than by a real dependency
+			// edge. See artifactbucket.go's own doc comment for the
+			// further deviation this registration carries: one bucket per
+			// service, not the brief's one bucket per environment.
+			Phase: resource.PhaseStorage,
+			// FunctionName-equivalent for a bucket is BucketName, settable
+			// and unique at create (see TypeS3Bucket's own registration
+			// above) — D7's derivable-name assumption holds here too; this
+			// is byName against artifactBucketName's derived name, not
+			// against ref.Name directly (see artifactBucketResource.Get).
+			Lookup:   resource.LookupByName,
+			Resource: newArtifactBucketResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeIAMRole,
+			Capability: manifest.CapabilityCompute,
+			// Ahead of the function that assumes it — see
+			// TypeArtifactBucket's registration above for the identical
+			// phase-as-ordering reasoning; this is the case the brief
+			// itself names.
+			Phase: resource.PhaseStorage,
+			// RoleName is settable at create; IAM's own reference marks
+			// renaming a role "Update requires: Replacement" — D7 holds.
+			Lookup:   resource.LookupByName,
+			Resource: newIAMRoleResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeLambdaURL,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// HTTP-triggered services only, and only when settings.
+			// httpFrontDoor selects "url" — see this registration's
+			// SelectedBy and ApiGatewayV2::Api's own below: a service gets
+			// exactly one of the two, never both. Before this gate existed,
+			// both applied to every HTTP-triggered service (and, since
+			// AppliesToTrigger("") always matches, to every service with no
+			// compute: block at all too) — the same wrong-output bug class
+			// AppliesToTrigger itself was built to eliminate, caught in PR
+			// #80's review and fixed here rather than left in place.
+			Triggers:   []string{manifest.TriggerHTTP},
+			SelectedBy: httpFrontDoorIs(httpFrontDoorURL),
+			// Lambda::Url has no Tags property at all (verified against
+			// its CloudFormation resource reference: AuthType, Cors,
+			// InvokeMode, Qualifier, TargetFunctionArn only) — byTag is
+			// unavailable here the way it is for ApiGatewayV2::Api. Its own
+			// Name-equivalent identifier is TargetFunctionArn, which Lambda
+			// itself guarantees at most one Function URL per function per
+			// qualifier — a real uniqueness guarantee, so byAttr applies
+			// (see lambdaURLMatch's own doc comment for the one part of
+			// this that is not independently verified).
+			Lookup:   resource.LookupByAttr,
+			Resource: newLambdaURLResource(client),
+		},
+		{
+			Provider: Provider, Type: TypeEventsRule,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// Schedule-triggered services only — the direct fix for the bug
+			// that originally motivated Triggers: a schedule rule belongs
+			// only to a service with a schedule expression to run, exactly
+			// as ApiGatewayV2::Api/Lambda::Url belong only to one with an
+			// HTTP surface.
+			Triggers: []string{manifest.TriggerSchedule},
+			// Name is settable at create; EventBridge's own reference marks
+			// it "Update requires: Replacement" — D7 holds. See
+			// eventsrule.go's own doc comment for why Events::Rule was
+			// chosen over EventBridge Scheduler.
+			Lookup:   resource.LookupByName,
+			Resource: newEventsRuleResource(client),
+		},
+		{
+			Provider: Provider, Type: TypePermissionEventsRule,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// Same gate as the rule it authorizes: a schedule-triggered
+			// service only.
+			Triggers: []string{manifest.TriggerSchedule},
+			// See lambdapermission.go's own doc comment for identity
+			// strategy and the one part of it not independently verified
+			// against a live account.
+			Lookup: resource.LookupByAttr,
+			Resource: newLambdaPermissionResource(
+				client, "events.amazonaws.com", eventBridgeRuleSourceARN),
 		},
 		{
 			Provider: Provider, Type: TypeAPIGatewayV2API,
@@ -182,21 +288,45 @@ func Registrations(client *Client) []resource.Registration {
 			// schedule-invoked worker with no HTTP surface (kraai-api's
 			// `tick`) planned an API Gateway nothing would ever call — not
 			// merely redundant output, but a real, wrong resource once
-			// `kraai apply` executes the plan. A service that declares no
-			// compute: block at all still gets both, per
-			// Registration.AppliesToTrigger's trigger=="" case — unchanged
-			// from before this field existed.
-			Triggers: []string{manifest.TriggerHTTP},
+			// `kraai apply` executes the plan.
+			//
+			// SelectedBy: also only when settings.httpFrontDoor selects
+			// "apigateway" (the default) — see TypeLambdaURL's own comment
+			// above. A service declaring no compute: block at all still
+			// gets this one (trigger=="" always satisfies Triggers, and an
+			// absent httpFrontDoor setting defaults to "apigateway"), which
+			// is what "unchanged from before Triggers existed" actually
+			// meant before this workstream: one HTTP front door, not two.
+			Triggers:   []string{manifest.TriggerHTTP},
+			SelectedBy: httpFrontDoorIs(httpFrontDoorAPIGateway),
 			// Not byName: Name is mutable ("Update requires: No
 			// interruption" — not even createOnly) and AWS documents no
 			// uniqueness constraint on it. See apigatewayv2Match's doc
 			// comment for the full reasoning; this is a byTag type for the
 			// same reason ACM::Certificate is under D26.
-			Lookup: resource.LookupByTag,
-			Resource: &resourceType{
-				provider: Provider, typeName: TypeAPIGatewayV2API,
-				lookup: resource.LookupByTag, client: client, match: apigatewayv2Match, stampTag: apigatewayv2StampTag,
-			},
+			//
+			// Resource is newAPIGatewayResource, not a plain resourceType:
+			// this is where the API's real properties (Name, ProtocolType,
+			// the Target quick-create Lambda integration) actually get
+			// built — see apigatewayv2.go's own doc comment for why the
+			// bare generic engine could not create this type at all.
+			Lookup:   resource.LookupByTag,
+			Resource: newAPIGatewayResource(client),
+		},
+		{
+			Provider: Provider, Type: TypePermissionAPIGateway,
+			Capability: manifest.CapabilityCompute,
+			Phase:      resource.PhaseCompute,
+			// Same double gate as the API Gateway it authorizes: an
+			// HTTP-triggered service with "apigateway" selected as its
+			// front door only — creating this permission for a service
+			// that has no API Gateway (httpFrontDoor: "url") would name a
+			// SourceArn Cloud Control could never resolve.
+			Triggers:   []string{manifest.TriggerHTTP},
+			SelectedBy: httpFrontDoorIs(httpFrontDoorAPIGateway),
+			Lookup:     resource.LookupByAttr,
+			Resource: newLambdaPermissionResource(
+				client, "apigateway.amazonaws.com", apiGatewaySourceARN),
 		},
 	}
 }

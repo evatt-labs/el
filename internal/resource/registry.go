@@ -110,6 +110,31 @@ type Registration struct {
 	// for why this is a plain field checked by the caller (internal/plan's
 	// expandCompute) rather than folded into When/Condition.
 	Triggers []string
+	// SelectedBy, if set, additionally restricts this registration to a
+	// service whose merged compute settings satisfy it — for a case
+	// Triggers cannot express: two registrations that both apply to the
+	// same trigger, where a manifest must choose exactly one of them. An
+	// AWS Lambda function URL and an API Gateway HTTP API are both valid
+	// front doors for an HTTP-triggered service; without an additional
+	// gate, a service planned both, a wrong-output bug in exactly the
+	// shape Triggers itself was built to eliminate (see AppliesToTrigger's
+	// own doc comment) — trigger alone cannot express "pick one," because
+	// both registrations share the identical trigger value.
+	//
+	// nil means no additional gate, which is the common case: every
+	// registration that predates this field, and most that will follow
+	// it, has nothing to choose between. See AppliesToSettings for the
+	// exact matching rule.
+	//
+	// Keyed on a service's merged compute settings (the same map
+	// Spec.Config["settings"] carries, per internal/plan's expandCompute)
+	// rather than a new Condition parameter, for the same reason Triggers
+	// itself is a separate field and not folded into Condition: Condition
+	// is a pure function of one thing that is the same for every service
+	// in a manifest (which vendor fulfils each capability), while a
+	// service's own settings vary service to service and have nothing to
+	// do with vendor selection.
+	SelectedBy func(settings map[string]any) bool
 	// Resource implements the verbs.
 	Resource Resource
 }
@@ -180,6 +205,14 @@ func (r Registration) AppliesToTrigger(trigger string) bool {
 		}
 	}
 	return false
+}
+
+// AppliesToSettings reports whether this registration is wanted given a
+// service's merged compute settings. nil SelectedBy always matches — the
+// same "no additional opinion" contract Triggers == nil gives
+// AppliesToTrigger.
+func (r Registration) AppliesToSettings(settings map[string]any) bool {
+	return r.SelectedBy == nil || r.SelectedBy(settings)
 }
 
 // Key is the registry key, "provider/type".

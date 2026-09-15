@@ -211,6 +211,17 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 // the bug that motivated this workstream — every service used to plan one
 // resource per type the compute vendor registers, regardless of whether
 // that type made sense for what the service actually does.
+//
+// A registration's merged settings can further narrow that set via
+// resource.Registration.SelectedBy/AppliesToSettings, for a case Triggers
+// alone cannot express: more than one registration valid for the identical
+// trigger, where a manifest must choose exactly one (aws-provider-compute's
+// own case — a Lambda function URL and an API Gateway HTTP API are both
+// valid front doors for TriggerHTTP, and a service must get exactly one).
+// Checked after AppliesToTrigger, against the same mergedSettings this
+// function already builds for Spec.Config — no separate settings source, so
+// a registration's selector sees exactly what the provider's own Create
+// call will.
 func (p *Planner) expandCompute(
 	m *manifest.Manifest, environmentName, svcKey string, svc manifest.Service,
 ) ([]plannedItem, error) {
@@ -257,6 +268,9 @@ func (p *Planner) expandCompute(
 	out := make([]plannedItem, 0, len(regs))
 	for _, r := range regs {
 		if !r.AppliesToTrigger(trigger) {
+			continue
+		}
+		if !r.AppliesToSettings(mergedSettings) {
 			continue
 		}
 		out = append(out, plannedItem{
