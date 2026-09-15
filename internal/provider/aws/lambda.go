@@ -84,7 +84,15 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 		return resource.Spec{}, err
 	}
 
-	data, sha256Hex, err := buildArtifact(dir)
+	// include is set only when the service's manifest entry declares one
+	// (internal/plan's expandCompute omits an empty slice from Config
+	// entirely — see its own doc comment) so a plain type assertion, not a
+	// defensive multi-type read like settingStr's: this comes straight from
+	// manifest.Compute.Include, a typed []string field, never through a
+	// free-form settings map that could carry some other shape.
+	include, _ := spec.Config["include"].([]string)
+
+	data, sha256Hex, err := buildArtifact(dir, include)
 	if err != nil {
 		return resource.Spec{}, err
 	}

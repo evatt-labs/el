@@ -203,7 +203,11 @@ func (p *Planner) expand(m *manifest.Manifest, environmentName string) ([]planne
 // thing a compute provider cannot derive: everything else about how to build
 // and deploy comes from providers.compute.settings (merged with the
 // service's own, per svc.Compute.Settings), but where the code lives is per
-// service.
+// service. svc.Compute.Include rides alongside dir for the same reason: it
+// is this service's own escape hatch back into a directory its own
+// .gitignore excludes (see manifest.Compute.Include's own doc comment), so
+// it can only ever come from this service's manifest entry, never from
+// providers.compute.settings.
 //
 // A service's Compute block, when present, also decides which of the
 // vendor's registered resource types actually apply: see
@@ -243,11 +247,13 @@ func (p *Planner) expandCompute(
 	var trigger string
 	var svcSettings map[string]any
 	var handler, schedule string
+	var include []string
 	if svc.Compute != nil {
 		trigger = svc.Compute.Trigger
 		svcSettings = svc.Compute.Settings
 		handler = svc.Compute.Handler
 		schedule = svc.Compute.Schedule
+		include = svc.Compute.Include
 	}
 	mergedSettings := manifest.MergeSettings(provider.Settings, svcSettings)
 
@@ -261,6 +267,9 @@ func (p *Planner) expandCompute(
 	}
 	if schedule != "" {
 		config["schedule"] = schedule
+	}
+	if len(include) > 0 {
+		config["include"] = include
 	}
 
 	reads := declaredBindings(svc)

@@ -377,6 +377,69 @@ func TestPlan_DatabaseCachingIsCarriedIntoConfig(t *testing.T) {
 	}
 }
 
+// TestPlan_ComputeIncludeIsCarriedIntoConfig proves svc.Compute.Include
+// reaches a compute resource's Spec.Config the same way dir, handler and
+// schedule already do (expandCompute's own doc comment) — this is what lets
+// aws-provider-compute's packaging code (internal/provider/aws/lambda.go)
+// see the manifest's include: entries at all.
+func TestPlan_ComputeIncludeIsCarriedIntoConfig(t *testing.T) {
+	f := newRegistryFixture(t)
+	compute := newFakeResource()
+	if err := f.reg.Register(resource.Registration{
+		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
+		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := f.oneServiceManifest()
+	m.Root.Providers.Compute = &manifest.Provider{Vendor: "aws"}
+	m.Services["api"] = manifest.Service{
+		Dir:     "services/api",
+		Compute: &manifest.Compute{Trigger: manifest.TriggerHTTP, Include: []string{"build/", "requirements.txt"}},
+	}
+
+	got, err := New(f.reg).Plan(t.Context(), m, "env-a")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	action := findAction(t, got, "aws", "AWS::Lambda::Function")
+	include, ok := action.Spec.Config["include"].([]string)
+	if !ok || len(include) != 2 || include[0] != "build/" || include[1] != "requirements.txt" {
+		t.Fatalf("Spec.Config[include] = %#v, want the declared Include value", action.Spec.Config["include"])
+	}
+}
+
+// TestPlan_ComputeWithNoIncludeOmitsConfigKey proves the "include" key is
+// absent, not present-but-empty, when a service declares no Compute.Include
+// — mirroring how trigger/handler/schedule are already omitted rather than
+// carried as their zero values (expandCompute), so a packaging provider can
+// tell "no override" from "override to nothing" without a nil-vs-empty-slice
+// footgun.
+func TestPlan_ComputeWithNoIncludeOmitsConfigKey(t *testing.T) {
+	f := newRegistryFixture(t)
+	compute := newFakeResource()
+	if err := f.reg.Register(resource.Registration{
+		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
+		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := f.oneServiceManifest()
+	m.Root.Providers.Compute = &manifest.Provider{Vendor: "aws"}
+	m.Services["api"] = manifest.Service{Dir: "services/api"}
+
+	got, err := New(f.reg).Plan(t.Context(), m, "env-a")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	action := findAction(t, got, "aws", "AWS::Lambda::Function")
+	if _, ok := action.Spec.Config["include"]; ok {
+		t.Fatalf("Spec.Config[include] present with no Compute.Include declared: %#v", action.Spec.Config["include"])
+	}
+}
+
 func TestPlan_MultipleServicesAreOrderedDeterministically(t *testing.T) {
 	f := newRegistryFixture(t)
 	m := &manifest.Manifest{
