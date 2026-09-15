@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
@@ -24,6 +25,11 @@ import (
 // NextToken that never stops advancing — the same defensive pattern the
 // Neon client uses for its cursor walk.
 const maxListPages = 100
+
+// maxEmptyBucketPages bounds EmptyBucket's page walk over ListObjectsV2, the
+// same defensive backstop maxListPages applies to ListResources, against a
+// NextContinuationToken that never stops advancing.
+const maxEmptyBucketPages = 100
 
 // Default polling bounds for asynchronous Cloud Control operations
 // (CreateResource, UpdateResource, DeleteResource). These are generous on
@@ -65,17 +71,35 @@ type cloudFormationAPI interface {
 
 // s3API is the subset of *s3.Client this package calls: PutObject, to
 // upload a Lambda deployment artifact to the per-environment artifact
-// bucket (aws-provider-compute).
+// bucket (aws-provider-compute), and ListObjectsV2/DeleteObjects, to empty
+// an artifact bucket before Cloud Control deletes it (EmptyBucket below).
 //
 // Deliberately not Cloud-Control-routed like every other verb in this
 // package: Cloud Control manages a bucket's own existence
 // (AWS::S3::Bucket's Get/Create/Delete), but has no notion of "put this
-// object in it" — object data planes are not part of the Cloud Control
-// resource-provider surface for any type. This is the one place this
-// package reaches past Cloud Control to a service-specific SDK client,
-// for exactly the operation Cloud Control cannot express.
+// object in it," "list what's in it" or "remove these objects" — object
+// data planes are not part of the Cloud Control resource-provider surface
+// for any type. This is the one place this package reaches past Cloud
+// Control to a service-specific SDK client, for exactly the operations
+// Cloud Control cannot express.
 type s3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	// ListObjectsV2 lists (up to 1000) current objects in a bucket per
+	// call — EmptyBucket's only listing primitive. This package never
+	// enables object versioning on a bucket it creates (artifactbucket.go's
+	// Create submits only BucketName, no VersioningConfiguration property,
+	// and Update is refused outright for this type — see that file's
+	// Delete doc comment for the full finding), so ListObjectVersions,
+	// which would additionally surface noncurrent versions and delete
+	// markers, is not part of this seam: adding it would be handling a
+	// state this package's own bucket can never reach.
+	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	// DeleteObjects removes up to 1000 objects in a single request —
+	// EmptyBucket's batch delete primitive, chosen over one DeleteObject
+	// call per key because this runs on every teardown and the two
+	// services' page/batch ceilings are identical (see EmptyBucket's doc
+	// comment).
+	DeleteObjects(ctx context.Context, params *s3.DeleteObjectsInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
 
 // stsAPI is the subset of *sts.Client this package calls: GetCallerIdentity,
@@ -656,6 +680,126 @@ func (c *Client) PutObject(ctx context.Context, bucket, key string, body []byte)
 		return kerrors.Wrap(err, kerrors.CodeUnexpected, "uploading s3://%s/%s", bucket, key)
 	}
 	return nil
+}
+
+// EmptyBucket deletes every object in bucket, so a subsequent
+// AWS::S3::Bucket delete (Client.DeleteResource, routed through Cloud
+// Control) can succeed. This closes a real, reproduced failure: `kraai
+// destroy` against a live account left every artifact bucket behind,
+// because S3 refuses to delete a non-empty bucket —
+//
+//	deleting AWS::S3::Bucket "kraaiapi-pull-request-00001-api-artifacts":
+//	operation ended FAILED (error code "GeneralServiceException"): The
+//	bucket you tried to delete is not empty (Service: S3, Status Code: 409)
+//
+// — and artifactBucketResource.Delete used to hand that delete straight to
+// the generic Cloud Control engine with no emptying step at all.
+//
+// # Why this is a Client method, not Cloud Control logic
+//
+// Emptying a bucket is exactly the kind of object-data-plane operation
+// Cloud Control cannot express (see the s3API doc comment): it belongs
+// beside PutObject, the one other place this package reaches past Cloud
+// Control to the S3 SDK directly, not inside DeleteResource's generic
+// poll-to-terminal machinery, which has no notion of a bucket's contents
+// at all.
+//
+// # One DeleteObjects call per ListObjectsV2 page, not list-then-rebatch
+//
+// ListObjectsV2 returns at most 1000 keys per page; DeleteObjects accepts
+// at most 1000 keys per request. Those ceilings are identical, so each
+// page is deleted as its own batch immediately, rather than accumulating
+// every key across every page in memory and re-chunking afterward — fewer
+// round trips than one DeleteObject per key (this runs on every teardown),
+// and no unbounded buffering for a bucket with many objects. The loop
+// keeps following NextContinuationToken while IsTruncated is true, so a
+// bucket with more than 1000 objects is still fully emptied, not just its
+// first page.
+//
+// # No version or delete-marker handling — verified, not assumed
+//
+// artifactbucket.go's Create submits only {"BucketName": realName} as
+// desired state (see that file's own doc comment on why Config must be
+// replaced rather than carried through), never a VersioningConfiguration
+// property, and Update is refused outright for this type — there is no
+// path through this package that ever turns versioning on for a bucket it
+// created. S3 buckets are unversioned by default. A ListObjectsV2 pass
+// over current objects therefore already sees everything a kraai-created
+// artifact bucket can ever hold; there are no noncurrent versions or
+// delete markers to additionally list and remove. Handling them anyway
+// would be speculative code for a state this package's own bucket cannot
+// reach — the s3API doc comment records the same finding at the interface
+// boundary.
+//
+// # Absence is success, per resource.Resource.Delete's own contract
+//
+// A NoSuchBucket error from the listing call means the bucket is already
+// gone: teardown must be retryable (internal/destroy/doc.go), and a
+// destroy that already emptied and deleted this bucket on a prior,
+// partially-failed run must be able to finish cleanly on a retry rather
+// than erroring on a bucket that no longer exists. Every other failure —
+// access denied, throttling, a malformed response, an object-level error
+// reported inside a nominally successful DeleteObjects response — is real
+// and is returned wrapped with kerrors, naming the bucket, never silently
+// treated as if it meant the same thing as absence.
+func (c *Client) EmptyBucket(ctx context.Context, bucket string) error {
+	var token *string
+	for page := 0; page < maxEmptyBucketPages; page++ {
+		out, err := c.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			var notFound *s3types.NoSuchBucket
+			if errors.As(err, &notFound) {
+				return nil
+			}
+			return kerrors.Wrap(err, kerrors.CodeUnexpected, "listing objects in bucket %q", bucket)
+		}
+
+		if len(out.Contents) > 0 {
+			ids := make([]s3types.ObjectIdentifier, len(out.Contents))
+			for i, obj := range out.Contents {
+				ids[i] = s3types.ObjectIdentifier{Key: obj.Key}
+			}
+			delOut, err := c.s3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(bucket),
+				Delete: &s3types.Delete{Objects: ids},
+			})
+			if err != nil {
+				return kerrors.Wrap(err, kerrors.CodeUnexpected, "deleting objects from bucket %q", bucket)
+			}
+			// A DeleteObjects call can return a 200 OK overall while
+			// individual keys failed — S3 reports those per-object, in
+			// Errors, not as a Go error from the call itself. Surfacing
+			// only the first is enough to make the failure actionable
+			// without flooding the caller with a redundant list when many
+			// keys fail for the same reason (e.g. one access-denied
+			// policy blocking every delete in the batch).
+			if len(delOut.Errors) > 0 {
+				first := delOut.Errors[0]
+				key, code, msg := "<unknown key>", "<unknown code>", "<no message>"
+				if first.Key != nil {
+					key = *first.Key
+				}
+				if first.Code != nil {
+					code = *first.Code
+				}
+				if first.Message != nil {
+					msg = *first.Message
+				}
+				return kerrors.Wrap(errors.New(msg), kerrors.CodeUnexpected,
+					"deleting %d of %d object(s) from bucket %q failed (e.g. key %q: %s)",
+					len(delOut.Errors), len(ids), bucket, key, code)
+			}
+		}
+
+		if out.IsTruncated == nil || !*out.IsTruncated || out.NextContinuationToken == nil {
+			return nil
+		}
+		token = out.NextContinuationToken
+	}
+	return kerrors.Validation("emptying bucket %q did not terminate within %d pages", bucket, maxEmptyBucketPages)
 }
 
 // AccountID returns the AWS account id the configured credentials

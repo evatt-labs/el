@@ -90,11 +90,19 @@ func artifactBucketName(serviceName string) string {
 // around silently.
 type artifactBucketResource struct {
 	inner *resourceType
+	// client is the same *Client inner.client already holds, kept as its
+	// own field because inner.client is typed ccAPI — the generic Cloud
+	// Control surface (resource.go) — which has no S3 object-data-plane
+	// methods on it at all. Delete needs EmptyBucket, which lives on the
+	// concrete *Client beside PutObject (client.go), so this field exists
+	// purely to reach it; every other method here still goes through inner.
+	client *Client
 }
 
 func newArtifactBucketResource(client *Client) *artifactBucketResource {
 	return &artifactBucketResource{
-		inner: &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: client},
+		inner:  &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: client},
+		client: client,
 	}
 }
 
@@ -159,6 +167,56 @@ func (a *artifactBucketResource) Update(context.Context, resource.Ref, resource.
 		"an artifact bucket has no in-place configuration; replace it instead")
 }
 
+// Delete empties the real bucket before deleting it.
+//
+// # The bug this closes
+//
+// Before this method emptied anything, Delete forwarded straight to
+// a.inner.Delete — the generic Cloud Control engine — which issues a bare
+// DeleteResource. S3's own delete handler refuses a non-empty bucket, and
+// this bucket is never empty by the time teardown runs it: lambda.go's
+// PutObject has already uploaded at least one content-addressed artifact
+// object into it (artifactObjectKey) by the time a service's Lambda
+// function exists to delete. A real `kraai destroy` against a live AWS
+// account reproduced exactly this:
+//
+//	destroy for "kraaiapi-pull-request-00001": 10 deleted, 0 skipped, 2 failed (12 total)
+//	  !  failed  ...ArtifactBucket  api.api   deleting AWS::S3::Bucket "kraaiapi-pull-request-00001-api-artifacts":
+//	     operation ended FAILED (error code "GeneralServiceException"): The bucket you tried to delete
+//	     is not empty (Service: S3, Status Code: 409 ...)
+//
+// Both this service's buckets ("-api-artifacts" and "-tick-artifacts")
+// then remained in the account indefinitely, still billable, with every
+// future destroy of the same environment hitting the identical failure —
+// exactly the silent-accumulation failure mode kraai's ephemeral-
+// environment thesis exists to prevent (this workstream's brief).
+//
+// # Emptying runs before the real bucket is resolved for delete
+//
+// EmptyBucket (client.go) is called against the same real bucket name
+// bucketRef(ref) already resolves — the same rewrite Get and Create use,
+// for the same reason (see bucketRef's own doc comment): the caller's Ref
+// still carries the service-derived name, never the real S3 bucket name,
+// so calling EmptyBucket against ref.Name directly would target a bucket
+// that was never the one this resource actually owns.
+//
+// # Why emptying does not itself decide whether to call inner.Delete
+//
+// EmptyBucket already returns nil for a bucket that does not exist (see
+// its own doc comment) rather than a sentinel this method would need to
+// branch on, and a.inner.Delete already tolerates a bucket that does not
+// exist: this type's byName lookup treats the derived name as the
+// identifier unconditionally (resourceType.resolve), so Delete always
+// reaches Client.DeleteResource, whose own contract already treats a
+// ResourceNotFoundException/NotFound terminal state as success (see that
+// method's doc comment). Running both steps unconditionally, in order,
+// means an already-fully-deleted bucket takes the exact same path as a
+// bucket freshly emptied here, with no extra branching either method needs
+// to expose to the other.
 func (a *artifactBucketResource) Delete(ctx context.Context, ref resource.Ref) error {
-	return a.inner.Delete(ctx, bucketRef(ref))
+	realRef := bucketRef(ref)
+	if err := a.client.EmptyBucket(ctx, realRef.Name); err != nil {
+		return err
+	}
+	return a.inner.Delete(ctx, realRef)
 }
