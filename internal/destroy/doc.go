@@ -103,11 +103,23 @@
 // imported resource, not an ownership tier this package would need to
 // track.
 //
-// # No locking
+// # Scope locking, within one run
+//
+// Exactly like internal/apply: execute resolves each action's
+// Registration.ScopeFor(act.Spec) and runs its Delete call through a
+// resource.ScopeLocker shared across this Destroy call, inside the same
+// errgroup runPhase already bounds by count. A teardown deleting several
+// branches in the same Neon project is exactly as capable of tripping
+// Neon's one-mutation-per-project serialization as an apply creating them
+// — see internal/resource/registry.go's Registration.Scope doc comment.
+//
+// # No cross-process locking
 //
 // Same explicit scope note as internal/apply: the lock-and-status
 // workstream this package will eventually sit behind is not built.
 // Concurrent destroys (or a destroy racing an apply) against the same
-// environment are unguarded until that lands — kerrors.CodeLockHeld (exit
-// code 3) stays unused by this package.
+// environment, from two different invocations of kraai, are unguarded
+// until that lands — kerrors.CodeLockHeld (exit code 3) stays unused by
+// this package. This is unrelated to the scope locking above, which
+// guards only the goroutines within one Destroy call against each other.
 package destroy

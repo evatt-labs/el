@@ -153,11 +153,30 @@
 // calls Update at all: there is no registered type it could do anything
 // useful with.
 //
+// # Scope locking, within one run
+//
+// A phase's concurrent actions can still collide with each other even
+// under D13's bounded concurrency, when the provider itself serializes by
+// something other than request count — Neon permits only one in-flight
+// mutation per project, discovered from a real `kraai apply` 423 (see
+// internal/resource/registry.go's Registration.Scope doc comment for the
+// failure and the fix). mutate resolves each action's scope via
+// Registration.ScopeFor and serializes the mutating call through a
+// resource.ScopeLocker shared across this Apply call's whole phase loop,
+// inside the same errgroup runPhase already bounds by count — the two
+// mechanisms compose rather than replace each other: D13 still caps how
+// many actions run at once, ScopeLocker additionally prevents two of them
+// that share a scope from running their provider calls at the same
+// instant.
+//
 // # Explicitly out of scope
 //
-// No locking. The lock-and-status workstream this package will eventually
-// sit behind is not built, and building even a stub of it here would be
-// scope this task does not own. Concurrent applies against the same
-// environment are unguarded until that lands — kerrors.CodeLockHeld (exit
-// code 3) stays unused by this package.
+// No cross-process locking. The lock-and-status workstream this package
+// will eventually sit behind is not built, and building even a stub of it
+// here would be scope this task does not own. Concurrent applies against
+// the same environment, from two different invocations of kraai, are
+// unguarded until that lands — kerrors.CodeLockHeld (exit code 3) stays
+// unused by this package. This is unrelated to the scope locking above,
+// which guards only the goroutines within one Apply call against each
+// other, not one process against another.
 package apply

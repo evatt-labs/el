@@ -136,6 +136,57 @@ func TestRegistrationsCoverTheCapability(t *testing.T) {
 	}
 }
 
+// TestBranchScope pins newBranchScope's contract: every branch this
+// registration produces resolves to the same scope, keyed on the
+// registration's own settings.Project/OrgID rather than anything in the
+// per-call Spec — see newBranchScope's doc comment for why. This is the
+// mechanism internal/resource/registry.go's Registration.Scope exists for:
+// two branches sharing a project must serialize, which this test checks
+// at the level that actually matters — the string two different Specs
+// produce is identical, and a different project's settings produce a
+// different string.
+func TestBranchScope(t *testing.T) {
+	nc, _ := neonClient(t, standardNeon(`[]`))
+	reg := resource.NewRegistry()
+	if err := Register(reg, nc, nil, settings()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	branch, ok := reg.Lookup("neon/branch")
+	if !ok {
+		t.Fatalf("neon/branch was not registered")
+	}
+	if branch.Scope == nil {
+		t.Fatalf("branch registration has no Scope — two branches on one Neon project would race unserialized")
+	}
+
+	// Two different Specs — different binding, different config, one with
+	// no config at all — all resolve to the same scope, because the
+	// project this branch registration acts against is fixed by
+	// settings(), not by anything in Spec.
+	s1 := branch.ScopeFor(resource.Spec{Binding: "DB"})
+	s2 := branch.ScopeFor(resource.Spec{Binding: "OTHER", Config: map[string]any{"driver": "postgres"}})
+	if s1 == "" {
+		t.Fatal("scope is empty — every branch would be treated as unscoped")
+	}
+	if s1 != s2 {
+		t.Fatalf("scope varied across Specs for the same registration: %q vs %q", s1, s2)
+	}
+
+	// A different project's settings produce a different scope, so two
+	// registrations for two different projects (a future multi-project
+	// manifest) would not serialize against each other.
+	otherSettings := BranchSettings{Project: "other-project", Database: "appdb", Role: "app", OrgID: "org-1"}
+	otherReg := resource.NewRegistry()
+	if err := Register(otherReg, nc, nil, otherSettings); err != nil {
+		t.Fatalf("Register (other project): %v", err)
+	}
+	otherBranch, _ := otherReg.Lookup("neon/branch")
+	if got := otherBranch.ScopeFor(resource.Spec{}); got == s1 {
+		t.Fatalf("scope for a different project matched the first project's scope: %q", got)
+	}
+}
+
 func TestBranchCreateForksTheDefault(t *testing.T) {
 	nc, seen := neonClient(t, func(c call) (int, string) {
 		switch {

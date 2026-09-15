@@ -82,6 +82,11 @@ func (a *Applier) Apply(ctx context.Context, p *plan.Plan) (*Result, error) {
 
 	outputs := resource.NewOutputs()
 	secrets := newSecretIndex()
+	// One locker per run: scoped mutual exclusion only has to hold across
+	// this Apply call's own concurrent goroutines (see
+	// resource.ScopeLocker's doc comment on why it is not a shared
+	// singleton).
+	locker := resource.NewScopeLocker()
 
 	// Phases run in sequence (mirroring internal/plan/planner.go's own
 	// phase loop); once one has a failure, no later phase starts — see the
@@ -96,7 +101,7 @@ func (a *Applier) Apply(ctx context.Context, p *plan.Plan) (*Result, error) {
 			skipPhase(p.Actions, idxs, results)
 			continue
 		}
-		if a.runPhase(ctx, p.Actions, idxs, results, outputs, secrets) {
+		if a.runPhase(ctx, p.Actions, idxs, results, outputs, secrets, locker) {
 			phaseFailed = true
 		}
 	}
@@ -150,7 +155,7 @@ func skipPhase(actions []plan.Action, idxs []int, results []ActionResult) {
 // action-level) failure handling exists to avoid.
 func (a *Applier) runPhase(
 	ctx context.Context, actions []plan.Action, idxs []int, results []ActionResult,
-	outputs *resource.Outputs, secrets *secretIndex,
+	outputs *resource.Outputs, secrets *secretIndex, locker *resource.ScopeLocker,
 ) bool {
 	g := &errgroup.Group{}
 	g.SetLimit(a.concurrency)
@@ -159,7 +164,7 @@ func (a *Applier) runPhase(
 	for pos, i := range idxs {
 		pos, i := pos, i
 		g.Go(func() error {
-			res := a.execute(ctx, actions[i], outputs, secrets)
+			res := a.execute(ctx, actions[i], outputs, secrets, locker)
 			results[i] = res
 			failed[pos] = res.Outcome == OutcomeFailed
 			return nil
@@ -182,6 +187,7 @@ func (a *Applier) runPhase(
 // siblings.
 func (a *Applier) execute(
 	ctx context.Context, act plan.Action, outputs *resource.Outputs, secrets *secretIndex,
+	locker *resource.ScopeLocker,
 ) ActionResult {
 	result := ActionResult{Item: act.Item, Ref: act.Ref}
 
@@ -204,7 +210,7 @@ func (a *Applier) execute(
 	// action turns out to need one anyway.
 	spec.Secrets = secrets.forAction(act.ServiceKey, act.Binding, effectiveReadsBindings(act))
 
-	state, outcome, err := a.mutate(ctx, act, reg.Resource, spec)
+	state, outcome, err := a.mutate(ctx, act, reg, spec, locker)
 	if err != nil {
 		result.Outcome = OutcomeFailed
 		result.Err = kerrors.Wrap(err, kerrors.CodeUnexpected,
@@ -249,12 +255,34 @@ func effectiveReadsBindings(act plan.Action) []string {
 // returns the resulting state, the Outcome that call represents, and any
 // error. The returned Outcome is meaningful even on error, purely so
 // execute's wrapped error message can say which verb failed.
+//
+// # Scope locking
+//
+// reg.ScopeFor(spec) resolves once per call and, when non-empty, serializes
+// the entire case below through locker.Do — for ActionReplace that means
+// Delete and Create both run inside the same held lock, as one operation,
+// rather than as two separately-locked calls: the whole point of a replace
+// is that the old and new resource share an identity, so nothing else
+// touching that identity's scope may run between the delete and the create
+// that follows it either. See resource.Registration.Scope's doc comment
+// for why this exists at all (the live 423 it prevents) and
+// resource.ScopeLocker's for why locking never nests — this call takes at
+// most one scope lock, held for its own duration only.
 func (a *Applier) mutate(
-	ctx context.Context, act plan.Action, res resource.Resource, spec resource.Spec,
+	ctx context.Context, act plan.Action, reg resource.Registration, spec resource.Spec,
+	locker *resource.ScopeLocker,
 ) (*resource.State, Outcome, error) {
+	res := reg.Resource
+	scope := reg.ScopeFor(spec)
+
 	switch act.Kind {
 	case plan.ActionCreate:
-		state, err := res.Create(ctx, spec)
+		var state *resource.State
+		err := locker.Do(scope, func() error {
+			var err error
+			state, err = res.Create(ctx, spec)
+			return err
+		})
 		return state, OutcomeCreated, err
 
 	case plan.ActionNoChange:
@@ -263,7 +291,8 @@ func (a *Applier) mutate(
 		// plan.ActionKind's own contract (ActionNoChange only follows a
 		// Get that found something) — guarded here anyway because trusting
 		// an invariant silently, across a package boundary, is exactly
-		// the kind of assumption Rule 5 exists to catch.
+		// the kind of assumption Rule 5 exists to catch. No scope lock
+		// either: there is no mutating call to serialize.
 		if act.Current == nil {
 			return nil, OutcomeUnchanged, kerrors.New(
 				"action for %q is ActionNoChange but carries no Current state — invalid plan",
@@ -275,10 +304,15 @@ func (a *Applier) mutate(
 		// Delete then Create, never Update: every registered type refuses
 		// Update with resource.ErrImmutable (see the package doc), so a
 		// replace is genuinely a new resource under the same Ref.
-		if err := res.Delete(ctx, act.Ref); err != nil {
-			return nil, OutcomeReplaced, err
-		}
-		state, err := res.Create(ctx, spec)
+		var state *resource.State
+		err := locker.Do(scope, func() error {
+			if err := res.Delete(ctx, act.Ref); err != nil {
+				return err
+			}
+			var err error
+			state, err = res.Create(ctx, spec)
+			return err
+		})
 		return state, OutcomeReplaced, err
 
 	default:

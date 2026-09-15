@@ -67,6 +67,13 @@ func (d *Destroyer) Destroy(ctx context.Context, p *plan.Plan) (*Result, error) 
 
 	results := make([]ActionResult, len(p.Actions))
 	byPhase := indexByPhase(p.Actions)
+	// One locker per run, mirroring internal/apply.Apply — see
+	// resource.ScopeLocker's doc comment on why it is not a shared
+	// singleton, and internal/resource/registry.go's Registration.Scope
+	// doc comment for why teardown needs this too: two concurrent
+	// deletes against the same Neon project can 423 each other exactly
+	// like two concurrent creates can.
+	locker := resource.NewScopeLocker()
 
 	// Teardown runs phases in reverse (see resource.Phase's own doc
 	// comment, and this package's doc). Every phase runs regardless of
@@ -79,7 +86,7 @@ func (d *Destroyer) Destroy(ctx context.Context, p *plan.Plan) (*Result, error) 
 		if len(idxs) == 0 {
 			continue
 		}
-		d.runPhase(ctx, p.Actions, idxs, results)
+		d.runPhase(ctx, p.Actions, idxs, results, locker)
 	}
 
 	// A cancelled run is not a completed destroy, for the same reason
@@ -134,14 +141,17 @@ func indexByPhase(actions []plan.Action) map[resource.Phase][]int {
 // action's outcome, so one action's failure is recorded in results and
 // never propagated through the group, which would otherwise cancel every
 // sibling action still in flight in the same phase.
-func (d *Destroyer) runPhase(ctx context.Context, actions []plan.Action, idxs []int, results []ActionResult) {
+func (d *Destroyer) runPhase(
+	ctx context.Context, actions []plan.Action, idxs []int, results []ActionResult,
+	locker *resource.ScopeLocker,
+) {
 	g := &errgroup.Group{}
 	g.SetLimit(d.concurrency)
 
 	for _, i := range idxs {
 		i := i
 		g.Go(func() error {
-			results[i] = d.execute(ctx, actions[i])
+			results[i] = d.execute(ctx, actions[i], locker)
 			return nil
 		})
 	}
@@ -153,7 +163,7 @@ func (d *Destroyer) runPhase(ctx context.Context, actions []plan.Action, idxs []
 // ActionResult, so a caller running many of these concurrently (runPhase)
 // never has to decide what an error from this call would even mean for
 // its siblings.
-func (d *Destroyer) execute(ctx context.Context, act plan.Action) ActionResult {
+func (d *Destroyer) execute(ctx context.Context, act plan.Action, locker *resource.ScopeLocker) ActionResult {
 	result := ActionResult{Item: act.Item, Ref: act.Ref}
 
 	// plan.ActionCreate means Get found nothing: there is nothing to
@@ -174,6 +184,13 @@ func (d *Destroyer) execute(ctx context.Context, act plan.Action) ActionResult {
 		return result
 	}
 
+	// act.Spec is still the plan's derived desired state even in
+	// teardown (plan.Action carries the same fields for both verbs — see
+	// the package doc), so Registration.Scope resolves exactly the way
+	// it does in internal/apply, from the same Spec a Create for this
+	// same Ref.Key() would have used.
+	scope := reg.ScopeFor(act.Spec)
+
 	// act.Kind == plan.ActionFailed reaches here too, deliberately: Get
 	// could not read this resource's current state, so kraai does not know
 	// whether it exists, but resource.Resource.Delete is idempotent by
@@ -181,7 +198,8 @@ func (d *Destroyer) execute(ctx context.Context, act plan.Action) ActionResult {
 	// it anyway is safe and can only make progress. See the package doc's
 	// "Failure semantics are deliberately the OPPOSITE of apply's" section
 	// — this is the one line of code that section exists to explain.
-	if err := reg.Resource.Delete(ctx, act.Ref); err != nil {
+	err := locker.Do(scope, func() error { return reg.Resource.Delete(ctx, act.Ref) })
+	if err != nil {
 		result.Outcome = OutcomeFailed
 		result.Err = kerrors.Wrap(err, kerrors.CodeUnexpected,
 			"delete %s/%s %q", act.Provider, act.Type, act.Ref.Name)

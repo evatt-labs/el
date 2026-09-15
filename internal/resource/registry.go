@@ -135,8 +135,80 @@ type Registration struct {
 	// service's own settings vary service to service and have nothing to
 	// do with vendor selection.
 	SelectedBy func(settings map[string]any) bool
+	// Scope, if set, names the serialization domain this registration's
+	// mutating calls (Create, Update, Delete) must not overlap within.
+	// Derived from a Spec rather than fixed per registration, so two
+	// instances of the same type that scope to different values — a Neon
+	// branch in one project versus a Neon branch in another — still run
+	// concurrently; only two operations that resolve to the same string
+	// are serialized against each other. Nil means unscoped, which is the
+	// behaviour every registration predating this field keeps unchanged,
+	// and remains the common case: most provider APIs rate-limit by
+	// request count, which D13's global concurrency bound already handles.
+	//
+	// # Why this exists
+	//
+	// A real `kraai apply` against two services bound to the same Neon
+	// project failed like this:
+	//
+	//	!  failed  "kraaiapi-pull-request-00001-api-db"  neon/branch  api.DB
+	//	   create neon/branch: neon API returned 423 for
+	//	   /projects/dark-sky-69860828/branches: project already has running
+	//	   conflicting operations, scheduling of new ones is prohibited
+	//	+  created "kraaiapi-pull-request-00001-tick-db"  neon/branch  tick.DB
+	//
+	// D13 bounds concurrency by count, sized to provider rate limits.
+	// Neon does not rate-limit branch creation — it serializes by scope:
+	// at most one in-flight mutation per project, regardless of how far
+	// under any request-rate ceiling the caller stays. Two resources that
+	// happen to share a Neon project race every time, and the failure
+	// worsens with scale: twenty services on one project means twenty
+	// concurrent creates and nineteen 423s. No amount of tuning D13's
+	// SetLimit fixes this, because the constraint it is not scoped
+	// per-count at all — it is scoped per-project.
+	//
+	// # Why a Spec-derived function, not a fixed field
+	//
+	// A Neon project is a value from the manifest (BranchSettings.Project
+	// in internal/provider/neonresource), known only once a Spec exists —
+	// the registration itself is built once at process start, before any
+	// manifest is read, so nothing static on it could name a project.
+	// Shaped like Condition for the same reason Condition is a pure
+	// function over a small input rather than a wider one (see its own
+	// doc comment): a function keeps this package independent of
+	// internal/manifest and of any vendor package, since Spec is already
+	// this package's own vocabulary and a provider-specific string key
+	// ("project") is read out of Spec.Config by the registration's own
+	// closure, not by anything here.
+	//
+	// # Why registration data, not a Resource interface method
+	//
+	// internal/resource/otel.go's decorator wraps every resource.Resource
+	// at registration time and has already silently dropped an optional
+	// *interface* three separate times — SecretProducer, ImmutableDiffer,
+	// SpecValidator — each time because the decorator's wrapper type did
+	// not itself implement the interface, so a type assertion against the
+	// wrapped value failed even though the underlying resource satisfied
+	// it. A Scope() method on Resource would be the fourth trap of the
+	// same shape. Registration is plain data the decorator never wraps or
+	// re-implements, which is exactly why Triggers and SelectedBy already
+	// live here rather than on the interface — Scope follows the same
+	// precedent for the same reason.
+	Scope func(spec Spec) string
 	// Resource implements the verbs.
 	Resource Resource
+}
+
+// ScopeFor returns the serialization scope spec resolves to under this
+// registration's Scope function, or "" when the registration is unscoped
+// (Scope == nil) — "" is reserved to mean "no scope" throughout this
+// package and ScopeLocker, so a Scope function must never itself return
+// "" for a real scope it wants enforced.
+func (r Registration) ScopeFor(spec Spec) string {
+	if r.Scope == nil {
+		return ""
+	}
+	return r.Scope(spec)
 }
 
 // Condition reports whether a registration applies, given which vendor

@@ -358,6 +358,120 @@ func TestWithConcurrency_IgnoresNonPositive(t *testing.T) {
 	}
 }
 
+// --- scope locking ---
+
+// TestApply_ScopedRegistration_SerializesSameScope is the regression test
+// for the live failure Registration.Scope exists to fix: a real `kraai
+// apply` against two services bound to the same Neon project raced two
+// concurrent branch creates and got one 423. Every action below shares one
+// registration whose Scope always resolves to the same value, mirroring
+// several services all binding to one Neon project — the actual manifest
+// shape the incident reproduced. Asserts observed concurrency for that
+// scope never exceeds 1, even though WithConcurrency(n) permits n to run
+// at once.
+func TestApply_ScopedRegistration_SerializesSameScope(t *testing.T) {
+	const n = 6
+
+	f := newFakeResource()
+	f.delay = 20 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr,
+		Scope:    func(resource.Spec) string { return "neon:project:shared" },
+		Resource: f,
+	})
+
+	var actions []plan.Action
+	for i := 0; i < n; i++ {
+		actions = append(actions, action(fmt.Sprintf("svc%d", i), "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate))
+	}
+	p := &plan.Plan{Actions: actions}
+
+	result, err := New(reg, WithConcurrency(n)).Apply(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, r := range result.Results {
+		if r.Outcome == OutcomeFailed {
+			t.Fatalf("action failed: %+v", r)
+		}
+	}
+
+	if f.maxInFlight != 1 {
+		t.Fatalf("maxInFlight = %d, want 1: actions sharing a scope overlapped", f.maxInFlight)
+	}
+}
+
+// TestApply_ScopedRegistration_DifferentScopesRunConcurrently asserts the
+// other half of Registration.Scope's contract: two resources whose Spec
+// resolves to different scopes (two different Neon projects) are not
+// serialized against each other, only against themselves.
+func TestApply_ScopedRegistration_DifferentScopesRunConcurrently(t *testing.T) {
+	f := newFakeResource()
+	f.delay = 40 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr,
+		Scope: func(spec resource.Spec) string {
+			project, _ := spec.Config["project"].(string)
+			return "neon:project:" + project
+		},
+		Resource: f,
+	})
+
+	a1 := action("svc1", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate)
+	a1.Spec.Config = map[string]any{"project": "p1"}
+	a2 := action("svc2", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionCreate)
+	a2.Spec.Config = map[string]any{"project": "p2"}
+	p := &plan.Plan{Actions: []plan.Action{a1, a2}}
+
+	result, err := New(reg, WithConcurrency(2)).Apply(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, r := range result.Results {
+		if r.Outcome == OutcomeFailed {
+			t.Fatalf("action failed: %+v", r)
+		}
+	}
+
+	if f.maxInFlight < 2 {
+		t.Fatalf("maxInFlight = %d, want >= 2: different-scope actions ran serially", f.maxInFlight)
+	}
+}
+
+// TestApply_UnscopedRegistration_Unaffected pins the "nil means unscoped"
+// contract Registration.Scope's own doc comment states: a registration
+// that sets no Scope at all still runs its actions concurrently up to
+// WithConcurrency's limit, exactly as it did before this field existed —
+// this is the same assertion TestApply_ConcurrencyBounded already made,
+// named here explicitly as the scope-locking regression it also guards.
+func TestApply_UnscopedRegistration_Unaffected(t *testing.T) {
+	const n = 8
+	const limit = 4
+
+	f := newFakeResource()
+	f.delay = 20 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "cf", Type: "kv", Capability: "keyvalue",
+		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: f,
+		// Scope deliberately left nil.
+	})
+
+	var actions []plan.Action
+	for i := 0; i < n; i++ {
+		actions = append(actions, action("api", bindingName(i), "cf", "kv", resource.PhaseStorage, plan.ActionCreate))
+	}
+	p := &plan.Plan{Actions: actions}
+
+	if _, err := New(reg, WithConcurrency(limit)).Apply(context.Background(), p); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if f.maxInFlight < 2 {
+		t.Fatalf("maxInFlight = %d, want >= 2: an unscoped registration was unexpectedly serialized", f.maxInFlight)
+	}
+}
+
 // --- secret handoff ---
 
 func TestApply_SecretHandoffAcrossPhases_SameBinding(t *testing.T) {

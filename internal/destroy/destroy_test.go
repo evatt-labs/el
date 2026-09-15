@@ -421,6 +421,83 @@ func bindingName(i int) string {
 	return fmt.Sprintf("BINDING%d", i)
 }
 
+// --- scope locking ---
+
+// TestDestroy_ScopedRegistration_SerializesSameScope mirrors
+// internal/apply/apply_test.go's test of the same name: a teardown
+// deleting several branches that all live in one Neon project is exactly
+// as capable of racing Neon's per-project mutation lock as an apply
+// creating them (see internal/resource/registry.go's Registration.Scope
+// doc comment for the live 423 this prevents on the create side).
+func TestDestroy_ScopedRegistration_SerializesSameScope(t *testing.T) {
+	const n = 6
+
+	f := newFakeResource()
+	f.delay = 20 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr,
+		Scope:    func(resource.Spec) string { return "neon:project:shared" },
+		Resource: f,
+	})
+
+	var actions []plan.Action
+	for i := 0; i < n; i++ {
+		actions = append(actions, action(fmt.Sprintf("svc%d", i), "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange))
+	}
+	p := &plan.Plan{Actions: actions}
+
+	result, err := New(reg, WithConcurrency(n)).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	for _, r := range result.Results {
+		if r.Outcome == OutcomeFailed {
+			t.Fatalf("action failed: %+v", r)
+		}
+	}
+
+	if f.maxInFlight != 1 {
+		t.Fatalf("maxInFlight = %d, want 1: deletes sharing a scope overlapped", f.maxInFlight)
+	}
+}
+
+// TestDestroy_ScopedRegistration_DifferentScopesRunConcurrently mirrors
+// internal/apply's test of the same name for the delete path.
+func TestDestroy_ScopedRegistration_DifferentScopesRunConcurrently(t *testing.T) {
+	f := newFakeResource()
+	f.delay = 40 * time.Millisecond
+	reg := newRegistry(t, resource.Registration{
+		Provider: "neon", Type: "branch", Capability: "database",
+		Phase: resource.PhaseDatabase, Lookup: resource.LookupByAttr,
+		Scope: func(spec resource.Spec) string {
+			project, _ := spec.Config["project"].(string)
+			return "neon:project:" + project
+		},
+		Resource: f,
+	})
+
+	a1 := action("svc1", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange)
+	a1.Spec.Config = map[string]any{"project": "p1"}
+	a2 := action("svc2", "DB", "neon", "branch", resource.PhaseDatabase, plan.ActionNoChange)
+	a2.Spec.Config = map[string]any{"project": "p2"}
+	p := &plan.Plan{Actions: []plan.Action{a1, a2}}
+
+	result, err := New(reg, WithConcurrency(2)).Destroy(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	for _, r := range result.Results {
+		if r.Outcome == OutcomeFailed {
+			t.Fatalf("action failed: %+v", r)
+		}
+	}
+
+	if f.maxInFlight < 2 {
+		t.Fatalf("maxInFlight = %d, want >= 2: different-scope deletes ran serially", f.maxInFlight)
+	}
+}
+
 func TestWithConcurrency_IgnoresNonPositive(t *testing.T) {
 	d := New(resource.NewRegistry(), WithConcurrency(0))
 	if d.concurrency != defaultConcurrency {
