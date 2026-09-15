@@ -110,49 +110,64 @@ func TestSharedTransportReusesConnections(t *testing.T) {
 		totalRequests, workers, got, maxIdleConnsPerHost)
 }
 
-// TestUntunedTransportChurnsConnections is the contrast the brief asks for:
-// the identical harness as TestSharedTransportReusesConnections, but against
-// a transport left at Go's untuned default (MaxIdleConnsPerHost unset, so it
-// falls back to http.DefaultMaxIdleConnsPerHost == 2). It asserts the
-// opposite outcome — connection count scales with request count rather than
-// staying bounded — which is exactly the D13 gap this workstream closes, and
-// exactly what every one of the four clients named in the task brief did
-// before this package existed.
-func TestUntunedTransportChurnsConnections(t *testing.T) {
-	// Identical worker/request shape to TestSharedTransportReusesConnections
-	// — only the transport differs. That is the whole point of the
-	// contrast: same real-world concurrency, different pool tuning.
+// TestUntunedTransportChurnsMoreThanTuned is the contrast: the identical
+// harness driven through both transports, asserting the untuned one opens
+// meaningfully more connections than the tuned one.
+//
+// Deliberately a RELATIVE comparison rather than an absolute threshold.
+// Churn is a consequence of how much requests actually overlap, which
+// depends on machine speed — an earlier version asserted the untuned
+// transport exceeded a fixed count and failed on CI, because a fast runner
+// served the requests nearly serially and two idle connections sufficed.
+// That was not the untuned transport behaving well; it was the test failing
+// to create the condition it claimed to measure, then reporting the absence
+// of that condition as a defect.
+//
+// Measuring both in one run cancels machine speed out: whatever overlap the
+// host produces applies equally to both halves, so the only variable left is
+// the pool size, which is the thing under test.
+func TestUntunedTransportChurnsMoreThanTuned(t *testing.T) {
 	const workers = 10
 	const perWorker = 20
 	const totalRequests = workers * perWorker
 
-	srv := newCountingServer(func(w http.ResponseWriter, _ *http.Request) {
+	// The handler holds each request briefly so workers are genuinely in
+	// flight together. Without overlap there is nothing for a connection
+	// pool to do, and both transports would look identical.
+	const handlerDelay = 3 * time.Millisecond
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(handlerDelay)
 		w.WriteHeader(http.StatusOK)
-	})
-	defer srv.Close()
-
-	// Deliberately not NewClient: a bare client with a fresh, unshared,
-	// untuned transport, exactly the &http.Client{Timeout: ...} shape
-	// reachability, neon and cloudflare each used to build independently
-	// before this package existed.
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
-
-	fire(t, client, srv.URL, workers, perWorker)
-
-	got := srv.connections()
-	if got <= maxIdleConnsPerHost {
-		t.Fatalf("untuned default transport only opened %d connections for %d requests across %d workers — expected churn well above %d to demonstrate the contrast",
-			got, totalRequests, workers, maxIdleConnsPerHost)
 	}
-	t.Logf("untuned transport: %d requests across %d workers -> %d distinct connections (default MaxIdleConnsPerHost=2)",
-		totalRequests, workers, got)
-}
 
-// TestTwoCallersShareOnePool is the second piece of evidence the brief asks
-// for: two *http.Client values built with different timeouts — mirroring
-// neon's 60s and reachability's ProbeTimeout — still funnel through one
-// bounded pool when both are built by NewClient, because both wrap the same
-// package-level Transport.
+	measure := func(client *http.Client) int64 {
+		srv := newCountingServer(handler)
+		defer srv.Close()
+		fire(t, client, srv.URL, workers, perWorker)
+		return srv.connections()
+	}
+
+	// Untuned: a fresh, unshared transport at Go's defaults — exactly the
+	// &http.Client{Timeout: ...} shape reachability, neon and cloudflare
+	// each built independently before this package existed.
+	untuned := measure(&http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}})
+	// Tuned: the real production constructor, not a hand-rebuilt equivalent,
+	// so this measures what callers actually get.
+	tuned := measure(NewClient(5*time.Second, nil, nil))
+
+	t.Logf("%d requests across %d workers -> untuned %d connections, tuned %d (MaxIdleConnsPerHost=%d)",
+		totalRequests, workers, untuned, tuned, maxIdleConnsPerHost)
+
+	if tuned > maxIdleConnsPerHost {
+		t.Errorf("tuned transport opened %d connections, want at most the pool size %d",
+			tuned, maxIdleConnsPerHost)
+	}
+	if untuned <= tuned {
+		t.Errorf("untuned transport opened %d connections and tuned opened %d: "+
+			"want the untuned default to churn strictly more, or this harness is not "+
+			"creating enough overlap to measure pooling at all", untuned, tuned)
+	}
+}
 func TestTwoCallersShareOnePool(t *testing.T) {
 	const workersEach = 5
 	const perWorker = 20
