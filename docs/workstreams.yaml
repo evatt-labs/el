@@ -360,6 +360,63 @@ workstreams:
         (create/read/delete, no update) must be detected from the schema
         and surfaced as replace-or-fail rather than silently failing an
         update.
+      - >-
+        FOUND 2026-09-15 by review, fixed the same day (see
+        `internal/provider/aws/resource.go`'s `injectDerivedName`): a
+        `byName` type's generic `Create` submitted `Spec.Config` verbatim
+        with no injection of the derived name into the schema's own
+        `primaryIdentifier` property. For `AWS::S3::Bucket` specifically
+        (bare-registered, no per-type translate), and for every `objects`
+        binding until this fix (`expandBinding` passes `nil` `Config` for
+        `CapabilityObjects` — `internal/plan/planner.go`, out of this
+        workstream's scope), this meant an empty desired state: S3 treats
+        an absent `BucketName` as "generate one," so `Get` — which looks up
+        the *derived* name — could never find what `Create` actually made,
+        and every subsequent `plan` reported `create` again. Unbounded,
+        silent bucket duplication on every apply, never surfaced as an
+        error. Fixed generically for every `byName` registration (not
+        hand-patched per type) by having `Create` consult the type's own
+        CloudFormation `primaryIdentifier` and inject the derived name when
+        the property is absent, refusing loudly when the identifier is
+        compound or unresolvable rather than guessing. Also audited every
+        other registration's identity handling in the same pass; see the
+        next finding for what remains outstanding.
+      - >-
+        FOUND 2026-09-15, NOT fixed here (deliberately out of this task's
+        scope — see the PR that added this note): of the five
+        bare-`resourceType` registrations (no per-type translate),
+        `AWS::S3::Bucket` was the only one silently duplicating (see the
+        finding above); `AWS::CertificateManager::Certificate` is `byTag`
+        and already carries its identity via `stampTag`, so it is
+        unaffected. The remaining three —
+        `AWS::Route53::HostedZone` (byApi), `AWS::CloudFront::Distribution`
+        (byAttr) and `AWS::Route53::RecordSet` (byAttr) — also receive
+        `expandBinding`'s `nil` Config and submit an empty desired state,
+        but none of them are `byName`, so `injectDerivedName` does not and
+        should not touch them (D26: byApi/byAttr resolve identity by
+        listing and matching, not by asserting a name at create). Whether
+        Cloud Control's own required-property validation turns that empty
+        desired state into a loud `CreateResource` failure (this entry's
+        working assumption for `CloudFrontDistribution`, whose
+        `DistributionConfig` property is independently confirmed
+        `Required: Yes` in the CloudFormation resource reference, and for
+        `CertificateManager::Certificate`'s `DomainName`, likewise `Required:
+        Yes`) or something quieter is **not verified for `HostedZone` or
+        `RecordSet` specifically** — the CloudFormation template reference
+        (which this account's own `describe-type` finding above confirms is
+        schema-derived, carrying a real `required` array) documents
+        `HostedZone`'s `Name` and `RecordSet`'s `Name`/`HostedZoneId`/
+        `HostedZoneName` as `Required: No`, which would make an empty
+        desired state schema-valid rather than rejected — the same failure
+        shape as the S3 bug this task fixed, just not yet reproduced or
+        confirmed against a live `describe-type` call. All four need a real
+        per-type translate (a hosted zone needs a DNS name, a certificate a
+        domain, a distribution an origin, a record set its target) before
+        the `objects` capability can safely create any of them; building
+        those translates needs manifest schema work this workstream has not
+        done (`expandBinding` supplies no DNS-, certificate-, or
+        CDN-shaped config today) and is this workstream's own unfinished
+        business, not a new task.
     resolved:
       - >-
         RESOLVED 2026-09-13 as D26 + D27. D7's derivable-name assumption

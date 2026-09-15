@@ -199,6 +199,10 @@ func (r *resourceType) Create(ctx context.Context, spec resource.Spec) (*resourc
 		desired[k] = v
 	}
 
+	if err := r.injectDerivedName(ctx, spec, desired); err != nil {
+		return nil, err
+	}
+
 	if r.lookup == resource.LookupByTag {
 		if r.stampTag == nil {
 			return nil, kerrors.Validation(
@@ -220,6 +224,108 @@ func (r *resourceType) Create(ctx context.Context, spec resource.Spec) (*resourc
 		ID:         identifier,
 		Attributes: properties,
 	}, nil
+}
+
+// injectDerivedName ensures a LookupByName type's desired state carries
+// this create's own derived name, resolving which property that is from
+// the type's own CloudFormation resource-provider schema (getSchema,
+// already fetched and cached for Update/DiffersFromState) rather than a
+// hand-maintained property-per-type table. schemaPropertyPath — already
+// used to walk createOnlyProperties in DiffersFromState — does the
+// identical JSON-Pointer-to-map-key conversion here for
+// schema.PrimaryIdentifier.
+//
+// # Why this exists
+//
+// For LookupByName, the derived name *is* the provider's own primary
+// identifier (D26) — but Create otherwise submits spec.Config verbatim,
+// and nothing before this method ever puts the name into it.
+// AWS::S3::Bucket's own CloudFormation reference documents the resulting
+// failure mode explicitly: "If you don't specify a name, AWS
+// CloudFormation generates a unique ID and uses that ID for the bucket
+// name." An absent BucketName is not rejected, it is silently
+// reinterpreted as "generate one" — Get, which looks up the *derived* name
+// specifically, can then never find what Create actually made, and every
+// subsequent plan reports create again: an unbounded, silent resource
+// leak. Found live on TypeS3Bucket's bare registration (the only
+// LookupByName type with no per-type translate of its own to paper over
+// it); closed here for every LookupByName type at once rather than
+// per-type, so the same bug class cannot reappear the next time one is
+// registered bare.
+//
+// # Never clobbers a value the caller already set
+//
+// A per-type translate (lambda.go's FunctionName, iamrole.go's RoleName,
+// eventsrule.go's Name, artifactbucket.go's BucketName) already builds its
+// own real desired state and sets the identifying property itself, often
+// to a transformed value (artifactbucket.go's real bucket name differs
+// from spec.Name, the generic service name it derives from). This method
+// only fills the property in when it is entirely absent from desired —
+// presence, not truthiness, so a caller-set empty string is still treated
+// as deliberate and left alone. The alternative (always overwrite with
+// spec.Name) would silently break artifactbucket.go's own name rewrite,
+// for no benefit: a type that already sets its identity knows better than
+// a generic fallback what value belongs there.
+//
+// # Compound and unresolvable identifiers fail loudly, never guess
+//
+// A byName type's PrimaryIdentifier is expected to be exactly one
+// top-level property (D7's derivable-name assumption, verified per type in
+// register.go's own comments: BucketName, FunctionName, RoleName, Name).
+// AWS::Route53::RecordSet is the real counterexample this package already
+// knows about — its primary identifier is the compound
+// (HostedZoneId, Name, Type), and no single property is "the name" to
+// inject into; guessing one would just relocate this method's own bug
+// class into a different property instead of closing it. Anything other
+// than exactly one top-level path — zero (an identifier-less or
+// not-yet-meaningful schema), more than one (compound), or a nested path
+// this method does not attempt to address — is refused with a loud,
+// type-named error rather than silently submitting a desired state this
+// method could not actually populate. Rule 20: a create that cannot carry
+// its own identity must never reach CreateResource silently; a type in
+// this state needs its own translate (see artifactbucket.go or
+// apigatewayv2.go for the pattern), not the generic engine.
+func (r *resourceType) injectDerivedName(ctx context.Context, spec resource.Spec, desired map[string]any) error {
+	if r.lookup != resource.LookupByName {
+		// byTag stamps its own identity (stampTag, above, run by Create
+		// itself); byAttr/byApi let the provider assign the identifier.
+		// Only byName's identity is ever the derived name itself.
+		return nil
+	}
+
+	schema, err := r.getSchema(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(schema.PrimaryIdentifier) != 1 {
+		return kerrors.Validation(
+			"%s is registered LookupByName but its schema declares primary identifier %v, not a single property; "+
+				"a compound or unresolvable identifier cannot be populated generically from the derived name — give this type its own translate instead of the bare generic engine",
+			r.typeName, schema.PrimaryIdentifier)
+	}
+	path := schemaPropertyPath(schema.PrimaryIdentifier[0])
+	if len(path) != 1 {
+		return kerrors.Validation(
+			"%s is registered LookupByName but its primary identifier %q is not a top-level property; "+
+				"this type needs its own translate rather than the generic engine",
+			r.typeName, schema.PrimaryIdentifier[0])
+	}
+
+	prop := path[0]
+	if _, exists := desired[prop]; exists {
+		// A translate already set this deliberately; never override it.
+		return nil
+	}
+	if spec.Name == "" {
+		// Unreachable today — Create refuses an empty spec.Name before this
+		// method ever runs — but kept explicit rather than trusting that
+		// ordering to hold forever (Rule 20).
+		return kerrors.Validation(
+			"cannot create %s: no derived name available to populate %q", r.typeName, prop)
+	}
+	desired[prop] = spec.Name
+	return nil
 }
 
 // Update reconciles an existing resource to spec, or refuses with

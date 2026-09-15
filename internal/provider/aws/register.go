@@ -123,6 +123,17 @@ func Registrations(client *Client) []resource.Registration {
 			// resource's own Ref/primary identifier (CloudFormation
 			// TemplateReference, aws-resource-s3-bucket.html) — D7's
 			// derivable-name assumption holds.
+			//
+			// Bare resourceType, no per-type translate — this is the
+			// registration that motivated resourceType.Create's
+			// injectDerivedName (resource.go): an "objects" binding's
+			// Spec.Config is nil (expandBinding, internal/plan), so without
+			// that generic injection this Create submitted an empty desired
+			// state, and S3 silently generates a bucket name of its own for
+			// an absent BucketName rather than rejecting the request. See
+			// injectDerivedName's own doc comment for the full failure mode
+			// this closed, and docs/workstreams.yaml's aws-provider-core
+			// entry for the finding.
 			Lookup:   resource.LookupByName,
 			Resource: &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: client},
 		},
