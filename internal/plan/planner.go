@@ -406,6 +406,24 @@ func (p *Planner) getPhase(ctx context.Context, items []plannedItem) []Action {
 func decide(ctx context.Context, it plannedItem) Action {
 	action := Action{Item: it.Item, Ref: it.ref, Spec: it.spec}
 
+	// SpecValidator, when the underlying resource implements it, runs
+	// first and unconditionally — before Get, and therefore regardless of
+	// whether the resource already exists. See SpecValidator's own doc
+	// comment (validate.go) for the bug this fixes: a check reachable only
+	// through ImmutableDiffer (below) never runs on a brand-new
+	// environment's first plan, where every action is ActionCreate.
+	//
+	// Same dynamic-type type assertion as ImmutableDiffer's, on the same
+	// getter-narrowed it.res — no new path to a mutating verb.
+	if validator, ok := it.res.(SpecValidator); ok {
+		if err := validator.ValidateSpec(it.spec); err != nil {
+			action.Kind = ActionFailed
+			action.Err = kerrors.Wrap(err, kerrors.CodeValidation,
+				"validating %s/%s %q", it.Provider, it.Type, it.ref.Name)
+			return action
+		}
+	}
+
 	state, err := it.res.Get(ctx, it.ref)
 	if err != nil {
 		action.Kind = ActionFailed

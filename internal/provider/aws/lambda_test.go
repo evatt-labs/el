@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -107,6 +108,76 @@ func TestLambdaFunctionCreatePackagesUploadsAndWiresProperties(t *testing.T) {
 	}
 }
 
+// TestLambdaFunctionReservedConcurrentExecutions covers the property
+// reaching the function's desired state under the real Cloud Control name
+// (ReservedConcurrentExecutions, verified against the live
+// AWS::Lambda::Function schema — see LambdaSettings.
+// ReservedConcurrentExecutions' own doc comment in compute_settings.go),
+// and that absent vs. explicit-zero produce different desired states
+// rather than being conflated.
+func TestLambdaFunctionReservedConcurrentExecutions(t *testing.T) {
+	newFn := func(t *testing.T) (*lambdaFunctionResource, *fakeClient) {
+		t.Helper()
+		fc := &fakeClient{
+			createID: "myenv-api", createProps: map[string]any{},
+			schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+		}
+		return newLambdaFunctionResourceForTest(fc, &fakeS3{}, &fakeSTS{account: "123456789012"}), fc
+	}
+
+	t.Run("absent setting emits no property at all", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, nil)
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		if _, present := desired["ReservedConcurrentExecutions"]; present {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want the property omitted entirely", desired["ReservedConcurrentExecutions"])
+		}
+	})
+
+	t.Run("explicit zero emits 0, not an omitted property", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, map[string]any{"reservedConcurrency": 0})
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		got, present := desired["ReservedConcurrentExecutions"]
+		if !present {
+			t.Fatal("ReservedConcurrentExecutions absent, want present as 0")
+		}
+		if got != 0 {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want 0", got)
+		}
+	})
+
+	t.Run("a positive value reaches the desired state unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, map[string]any{"reservedConcurrency": 5})
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		if desired["ReservedConcurrentExecutions"] != 5 {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want 5", desired["ReservedConcurrentExecutions"])
+		}
+	})
+}
+
 func TestLambdaFunctionEnvLiteralsAndSecrets(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
@@ -182,6 +253,55 @@ func TestLambdaFunctionCreateRequiresDirAndHandler(t *testing.T) {
 	}
 }
 
+// TestLambdaFunctionValidateSpec covers plan.SpecValidator's actual
+// implementation: ValidateSpec must reject what decodeLambdaSettings
+// rejects, with no state, no ref, and no I/O (fakeClient/fakeSTS are never
+// touched — proven by newLambdaFunctionResourceForTest using fakes that
+// would record any call made to them, none of which this test asserts on
+// because none are made).
+func TestLambdaFunctionValidateSpec(t *testing.T) {
+	fn := newLambdaFunctionResourceForTest(&fakeClient{}, &fakeS3{}, &fakeSTS{})
+
+	t.Run("a valid spec passes", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+			},
+		}}
+		if err := fn.ValidateSpec(spec); err != nil {
+			t.Fatalf("ValidateSpec: %v", err)
+		}
+	})
+
+	t.Run("a typo'd key is rejected, naming it", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+				"reservdConcurrency": 5,
+			},
+		}}
+		err := fn.ValidateSpec(spec)
+		if err == nil {
+			t.Fatal("expected a validation error")
+		}
+		if !strings.Contains(err.Error(), "reservdConcurrency") {
+			t.Fatalf("error %q does not name the offending key", err.Error())
+		}
+	})
+
+	t.Run("an invalid httpFrontDoor is rejected", func(t *testing.T) {
+		spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+			"settings": map[string]any{
+				"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+				"httpFrontDoor": "totally-bogus-value",
+			},
+		}}
+		if err := fn.ValidateSpec(spec); err == nil {
+			t.Fatal("expected a validation error for an invalid httpFrontDoor")
+		}
+	})
+}
+
 func TestLambdaFunctionDiffersFromStateChecksOnlyFunctionName(t *testing.T) {
 	fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/FunctionName"}}}
 	fsts := &fakeSTS{account: "123456789012"}
@@ -241,5 +361,43 @@ func TestArtifactObjectKey(t *testing.T) {
 	want := "myenv-api/abc123.zip"
 	if got != want {
 		t.Fatalf("artifactObjectKey = %q, want %q", got, want)
+	}
+}
+
+// TestLambdaFunctionCreateOmitsLayersWhenUnset covers the directly-invoked
+// function: no Web Adapter layer, because nothing runs an ASGI app under it.
+//
+// Layers was previously emitted unconditionally, so a function with no
+// layerArn would have submitted Layers: [""] — an invalid ARN Cloud Control
+// rejects outright. That was unreachable only because decodeLambdaSettings
+// used to require layerArn, which in turn made a schedule-triggered service
+// unplannable at all; fixing that requirement exposed this.
+func TestLambdaFunctionCreateOmitsLayersWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fc := &fakeClient{
+		createID: "myenv-tick", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+	}
+	fn := newLambdaFunctionResourceForTest(fc, &fakeS3{}, &fakeSTS{account: "123456789012"})
+
+	spec := baseLambdaSpec(t, dir, nil)
+	// A directly-invoked function: an ordinary handler, no adapter layer.
+	settings, _ := spec.Config["settings"].(map[string]any)
+	delete(settings, "layerArn")
+	spec.Config["handler"] = "app.tasks.tick.handler"
+	spec.Config["trigger"] = "schedule"
+
+	if _, err := fn.Create(context.Background(), spec); err != nil {
+		t.Fatalf("Create without layerArn: %v", err)
+	}
+	if len(fc.createCalls) != 1 {
+		t.Fatalf("got %d CreateResource calls, want 1", len(fc.createCalls))
+	}
+	if got, ok := fc.createCalls[0]["Layers"]; ok {
+		t.Errorf("Layers present in desired state (%v), want omitted entirely", got)
 	}
 }
