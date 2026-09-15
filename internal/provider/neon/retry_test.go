@@ -176,3 +176,43 @@ func containsAll(s string, substrs ...string) bool {
 	}
 	return true
 }
+
+// TestRetry_DeadlineDuringRequestStillNamesLastStatus covers the case the
+// bounded-retry test only hit by accident, and therefore only sometimes.
+//
+// The retry loop's deadline can expire either between attempts or inside
+// one. Between attempts it reaches the select's ctx.Done case, which
+// reports the last observed status. Inside a request it does not: attempt
+// reports a transport failure as status 0, 0 is never retryable, and the
+// loop returned the bare transport error — dropping the status, which is
+// the one detail that distinguishes a locked project from a network fault.
+//
+// This is made deterministic by having the server hang well past the retry
+// budget, so the deadline always lands mid-request. The bounded-retry test
+// above reproduced it only when the machine happened to be slow enough,
+// which is why it failed on CI and on a loaded -race run while passing in
+// isolation.
+func TestRetry_DeadlineDuringRequestStillNamesLastStatus(t *testing.T) {
+	var calls atomic.Int32
+
+	client, _ := newTestClientWithOptions(t, func(*recorded) (int, string) {
+		// First attempt: a real 423, so the loop records a last status.
+		// Every later attempt hangs past the whole retry budget, forcing
+		// the deadline to expire inside the request rather than between.
+		if calls.Add(1) > 1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		return http.StatusLocked, `{"code":"LOCKED","message":"project already has running conflicting operations"}`
+	}, fastRetryTimings())
+
+	_, err := client.CreateBranch(t.Context(), "dark-sky-69860828", "br-main", "env-a")
+	if err == nil {
+		t.Fatal("expected an error when the retry deadline expires mid-request")
+	}
+
+	msg := err.Error()
+	if !containsAll(msg, "dark-sky-69860828", "423") {
+		t.Fatalf("error = %q, want it to name the project and the last observed status (423); "+
+			"a deadline that lands inside a request must not degrade to a bare transport error", msg)
+	}
+}
