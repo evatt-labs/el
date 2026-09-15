@@ -117,3 +117,40 @@ func TestValidateServices_TriggerVocabulary(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateServices_DependsOn covers Service.DependsOn's structural
+// sanity checks: a valid reference to another declared service, a
+// self-reference, and a reference to a service that does not exist.
+func TestValidateServices_DependsOn(t *testing.T) {
+	t.Run("depending on another declared service is valid", func(t *testing.T) {
+		services := map[string]Service{
+			"frontend": {DependsOn: []string{"backend"}},
+			"backend":  {},
+		}
+		if err := validateServices(services); err != nil {
+			t.Fatalf("validateServices: %v", err)
+		}
+	})
+
+	t.Run("a service cannot depend on itself", func(t *testing.T) {
+		services := map[string]Service{"api": {DependsOn: []string{"api"}}}
+		err := validateServices(services)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if got := err.Error(); !strings.Contains(got, "services.api.depends_on") || !strings.Contains(got, "itself") {
+			t.Fatalf("error = %q, want it to name services.api.depends_on and mention self-dependency", got)
+		}
+	})
+
+	t.Run("depending on an undeclared service is a validation error naming it", func(t *testing.T) {
+		services := map[string]Service{"api": {DependsOn: []string{"ghost"}}}
+		err := validateServices(services)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if got := err.Error(); !strings.Contains(got, "services.api.depends_on") || !strings.Contains(got, `"ghost"`) {
+			t.Fatalf("error = %q, want it to name services.api.depends_on and the missing service", got)
+		}
+	})
+}

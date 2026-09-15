@@ -7,60 +7,6 @@ import (
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
 
-// Phase orders provisioning (Q2, approved 2026-09-14).
-//
-// # Why phases rather than a dependency graph
-//
-// Resources genuinely depend on each other — a Hyperdrive configuration needs
-// the connection string of the database branch it fronts, so the branch has
-// to exist first. The JavaScript encoded that by hardcoding the order:
-// provider, then per-service resources, then deploy.
-//
-// A general dependency graph would express this too, and buys flexibility
-// nothing in kraai currently needs, at the cost of cycle detection,
-// partial-failure semantics across an arbitrary topology, and a much harder
-// model for anyone adding a resource type. Phases keep the ordering
-// declarative and legible: a registration names when it runs, the applier
-// runs phases in sequence and everything within a phase in parallel under a
-// global concurrency limit (D13).
-//
-// Teardown runs phases in reverse, which is what the JavaScript's own
-// teardown order already was.
-type Phase int
-
-const (
-	// PhaseDatabase provisions databases and their branches. First, because
-	// everything that binds to a database needs its connection details.
-	PhaseDatabase Phase = iota
-	// PhaseStorage provisions per-service storage: key-value, object, queue.
-	PhaseStorage
-	// PhaseCompute deploys the code that binds to everything above.
-	PhaseCompute
-)
-
-// phaseNames is used for messages and span attributes.
-var phaseNames = map[Phase]string{
-	PhaseDatabase: "database",
-	PhaseStorage:  "storage",
-	PhaseCompute:  "compute",
-}
-
-func (p Phase) String() string {
-	if name, ok := phaseNames[p]; ok {
-		return name
-	}
-	return "unknown"
-}
-
-// Valid reports whether p is a declared phase.
-func (p Phase) Valid() bool {
-	_, ok := phaseNames[p]
-	return ok
-}
-
-// Phases returns every phase in provisioning order.
-func Phases() []Phase { return []Phase{PhaseDatabase, PhaseStorage, PhaseCompute} }
-
 // Registration is one resource type's entry in the registry.
 type Registration struct {
 	// Provider and Type form the registry key: whose API this calls.
@@ -83,8 +29,77 @@ type Registration struct {
 	// "keyvalue", "objects", "queues", "compute". It is how a manifest entry
 	// that names no vendor reaches a vendor's implementation (Q1).
 	Capability string
-	// Phase is when this type is provisioned.
-	Phase Phase
+	// DependsOn names other registrations, by Key() ("provider/type"), that
+	// an instance of this type needs to exist before it can be created.
+	//
+	// # Why replaced Phase (2026-09-15)
+	//
+	// This field, and the graph internal/plan builds from it, replace
+	// resource.Phase entirely. Phase ordered provisioning into three fixed,
+	// hardcoded stages — database, storage, compute — run in sequence, with
+	// no ordering at all between two registrations in the same stage. That
+	// model ran out against a real deployment: a fresh `kraai apply` against
+	// a live AWS account took three runs to converge, because both
+	// AWS::Lambda::Permission registrations sit in PhaseCompute alongside
+	// the function and API Gateway they authorize, with no guarantee either
+	// existed yet when the permission's Create ran. Phase was also already
+	// being used as a priority number rather than a category: the IAM
+	// execution role and the S3 artifact bucket were declared PhaseStorage
+	// despite being neither storage nor a category match, purely so they
+	// would run before the function that needs them — both carried comments
+	// admitting exactly that. Adding a genuine third level of dependency
+	// (as the Lambda-permission case needed) had no expression under a
+	// two-or-three-stage model short of inventing a fourth phase.
+	//
+	// DependsOn says what an instance needs, directly, instead of which
+	// numbered bucket a human decided it belonged in. The IAM role and the
+	// artifact bucket now depend on nothing and are depended upon, instead
+	// of being filed under a storage category they never belonged to.
+	//
+	// # Instance-level, not type-level
+	//
+	// A dependency here names a type, but internal/plan resolves it to a
+	// concrete instance: a service's Lambda permission depends on
+	// "aws/AWS::Lambda::Function", and the planner resolves that against
+	// the function belonging to that same service, not every function in
+	// the manifest. Concretely, the planner resolves a dependency within
+	// the same expansion group that produced this registration's own
+	// plannedItem — the same (service, binding) pair a single
+	// Registry.Resolve call already scopes its results to (see
+	// internal/plan/planner.go's expand/expandCompute/expandBinding and
+	// internal/plan/graph.go's computeWaves). A provider/type key alone
+	// would be ambiguous the moment a manifest declares two services with
+	// compute; scoping resolution to the instance's own group is what
+	// keeps "the function" unambiguous without this package ever knowing
+	// what a service or a binding is.
+	//
+	// A registration whose named dependency was itself filtered out by
+	// When/Triggers/SelectedBy contributes no edge for it — there is no
+	// node to point at, and that is correct: a Lambda::Permission gated to
+	// the API Gateway front door is only ever planned alongside the API
+	// Gateway registration it names, so the dependency always resolves
+	// when the dependent registration itself applies.
+	//
+	// # Why not on the Resource interface
+	//
+	// Same reasoning as Scope below, and the same precedent Triggers and
+	// SelectedBy already set: internal/resource/otel.go's decorator wraps
+	// every Resource at registration time and has already silently dropped
+	// an optional *interface* three separate times (SecretProducer,
+	// ImmutableDiffer, SpecValidator) because the wrapper type did not
+	// itself implement it. DependsOn is plain registration data the
+	// decorator never wraps or re-implements, so it cannot fall into that
+	// trap.
+	//
+	// # Why not a manifest-level concept
+	//
+	// A type edge is what the code can already see: the aws package knows
+	// its own function needs its own role and bucket without asking a
+	// manifest author to say so. depends_on (manifest.Service) is the
+	// separate, narrower escape hatch for ordering that is real but that no
+	// registration can see — a service-to-service relationship the
+	// registry has no way to infer from types alone.
+	DependsOn []string
 	// Lookup is how instances are found (D26).
 	Lookup LookupStrategy
 	// When, if set, reports whether this registration applies to a given
@@ -258,8 +273,8 @@ func (r Registration) applies(vendors map[string]string) bool {
 // a separate, optional field lets Resolve stay exactly what it is — a
 // function of capability and vendor choice — and lets the one caller that
 // actually knows a service's trigger (expandCompute) apply this filter
-// itself, after Resolve, the same way it already reads Registration.Phase
-// and Registration.Type to build a plan item.
+// itself, after Resolve, the same way it already reads Registration.Type
+// to build a plan item.
 //
 // A second closure-typed field shaped like Condition (e.g. "func(trigger
 // string) bool") was also considered and rejected: Triggers only ever
@@ -390,11 +405,25 @@ func validate(reg Registration) error {
 		return kerrors.Validation(
 			"resource registration %q declares unknown lookup strategy %q",
 			reg.Provider+"/"+reg.Type, reg.Lookup)
-	case !reg.Phase.Valid():
+	case dependsOnSelf(reg):
 		return kerrors.Validation(
-			"resource registration %q declares unknown phase %d", reg.Provider+"/"+reg.Type, reg.Phase)
+			"resource registration %q declares itself in DependsOn", reg.Provider+"/"+reg.Type)
 	}
 	return nil
+}
+
+// dependsOnSelf reports whether reg names its own key in DependsOn — a
+// trivial one-node cycle that internal/plan's graph would otherwise have to
+// detect at plan time, on every plan, for a mistake that is fully knowable
+// at registration time.
+func dependsOnSelf(reg Registration) bool {
+	key := reg.Key()
+	for _, dep := range reg.DependsOn {
+		if dep == key {
+			return true
+		}
+	}
+	return false
 }
 
 // Lookup returns the registration for a provider/type key.
@@ -418,8 +447,11 @@ func (r *Registry) Lookup(key string) (Registration, bool) {
 // registration can declare a condition on a capability other than its own —
 // see Registration.When.
 //
-// Returned in phase order so the caller does not have to sort them, and
-// within a phase in registration order so expansion is deterministic.
+// Returned in registration order, which is what makes expansion
+// deterministic; ordering between registrations is no longer this
+// function's concern (see Registration.DependsOn) — a caller that needs an
+// execution order builds a dependency graph from the returned set instead
+// of relying on the order Resolve happens to hand them back in.
 func (r *Registry) Resolve(capability string, vendors map[string]string) ([]Registration, error) {
 	vendor := vendors[capability]
 	if vendor == "" {
@@ -457,12 +489,11 @@ func (r *Registry) Resolve(capability string, vendors map[string]string) ([]Regi
 			"vendor %q provides capability %q, but none of its resource types apply to this "+
 				"manifest's other provider choices", vendor, capability)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Phase < out[j].Phase })
 	return out, nil
 }
 
-// All returns every registration, in phase then key order, so a caller
-// iterating the registry gets a stable sequence.
+// All returns every registration, in key order, so a caller iterating the
+// registry gets a stable sequence.
 func (r *Registry) All() []Registration {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -472,9 +503,6 @@ func (r *Registry) All() []Registration {
 		out = append(out, reg)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Phase != out[j].Phase {
-			return out[i].Phase < out[j].Phase
-		}
 		return out[i].Key() < out[j].Key()
 	})
 	return out

@@ -12,19 +12,24 @@
 // mutating verbs — apply and destroy — will touch. Destroy never imports
 // internal/manifest and never walks a service's bindings itself.
 //
-// # Reverse phase order
+// # Reverse wave order
 //
-// internal/resource/registry.go's Phase doc already states it: "Teardown
-// runs phases in reverse." Apply provisions PhaseDatabase, then
-// PhaseStorage, then PhaseCompute, because a Hyperdrive configuration
-// needs its database branch to exist first and a Lambda needs both to
-// exist before it deploys. Destroy walks the same three phases backwards
-// — PhaseCompute, then PhaseStorage, then PhaseDatabase — for the same
-// dependency shape in reverse: the compute resource that reads a database
-// binding should stop reading from it before the binding disappears out
-// from under it. Within a phase, every action runs concurrently under one
-// errgroup.Group with SetLimit (D13), the same bounded-parallel shape
-// apply and plan both use and for the same reason.
+// Apply provisions wave 0 first, then 1, then 2, and so on — plan.Action.Wave,
+// computed by internal/plan/graph.go's computeWaves from real dependency
+// edges (resource.Registration.DependsOn plus manifest-level depends_on),
+// because a Hyperdrive configuration needs its database branch to exist
+// first and a Lambda needs its artifact bucket and execution role to exist
+// before it deploys. Destroy walks the same waves backwards — the highest
+// wave number first, down to 0 — for the same dependency shape in reverse:
+// the compute resource that reads a database binding should stop reading
+// from it before the binding disappears out from under it. This replaces
+// the old fixed three-phase order (database, storage, compute run forward;
+// compute, storage, database run backward) with the same reversal applied
+// to however many waves this plan's actual dependency graph produced — see
+// internal/resource/registry.go's Registration.DependsOn doc comment for
+// why the fixed phases were retired. Within a wave, every action runs
+// concurrently under one errgroup.Group with SetLimit (D13), the same
+// bounded-parallel shape apply and plan both use and for the same reason.
 //
 // # Skip what does not exist
 //
@@ -49,10 +54,10 @@
 // is present (see internal/apply's package doc, "The pre-flight gate"):
 // creating something whose current state is unknown is dangerous, because
 // apply cannot tell whether a Create would collide with something already
-// there. Apply also stops at the first phase with a failure and reports
-// every later phase as skipped, because a compute resource that binds to
-// a database phase that failed to fully create would be deployed against
-// a binding that does not exist.
+// there. Apply also stops at the first wave with a failure and reports
+// every later wave as skipped, because a compute resource that depends on
+// a database resource that failed to fully create would be deployed
+// against a binding that does not exist.
 //
 // Neither protection makes sense for teardown, and both would be actively
 // harmful if copied over:
@@ -66,8 +71,8 @@
 //     is success" — see resource.go): attempting a delete for a resource
 //     that may not exist costs nothing extra and can only make progress,
 //     never cause harm. So destroy attempts the delete anyway.
-//   - A failure partway through one phase must not stop a later phase
-//     from running. Apply's cross-phase gate exists because a
+//   - A failure partway through one wave must not stop a later wave
+//     from running. Apply's cross-wave gate exists because a
 //     half-created database is not safe to deploy code against; there is
 //     no destroy-side analogue of that danger. A Lambda that failed to
 //     delete does not make deleting the database behind it any less safe
@@ -75,18 +80,18 @@
 //     go in, and every resource destroy manages to remove is one fewer
 //     the operator has to find and delete by hand afterward.
 //
-// Within a phase, one action's failure still never cancels its siblings —
+// Within a wave, one action's failure still never cancels its siblings —
 // the same "the errgroup func always returns nil" pattern apply and plan
 // both use, for the same reason: a goroutine that returned its action's
 // error to the errgroup would abort every other action still in flight in
-// the same phase, which is exactly the behavior phase-level (not
+// the same wave, which is exactly the behavior wave-level (not
 // action-level) failure handling exists to avoid, here as much as in
 // apply.
 //
 // Destroy's job, in one sentence, is to make as much progress as possible
 // and report precisely what it could not remove, so a human knows exactly
 // what to clean up by hand. A future change that makes destroy gate on
-// ActionFailed or stop at the first failed phase — "to match apply" —
+// ActionFailed or stop at the first failed wave — "to match apply" —
 // would reintroduce the exact problem this workstream exists to solve:
 // an apply that fails halfway would then have no way to be torn down.
 //
@@ -108,7 +113,7 @@
 // Exactly like internal/apply: execute resolves each action's
 // Registration.ScopeFor(act.Spec) and runs its Delete call through a
 // resource.ScopeLocker shared across this Destroy call, inside the same
-// errgroup runPhase already bounds by count. A teardown deleting several
+// errgroup runWave already bounds by count. A teardown deleting several
 // branches in the same Neon project is exactly as capable of tripping
 // Neon's one-mutation-per-project serialization as an apply creating them
 // — see internal/resource/registry.go's Registration.Scope doc comment.

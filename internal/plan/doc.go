@@ -24,21 +24,43 @@
 // # Shape
 //
 // Plan is an ordered list of Action, one per resource type a manifest
-// binding expands to (D30), ordered by resource.Phase (D31) and stable
-// within a phase. Each Action names what it is about (service, binding,
-// capability, provider, type), the state Get found (nil if absent), and
-// what a subsequent apply would need to do about it — Create, NoChange, or
+// binding expands to (D30), ordered by Wave (graph.go) and stable within a
+// wave. Each Action names what it is about (service, binding, capability,
+// provider, type), the state Get found (nil if absent), and what a
+// subsequent apply would need to do about it — Create, NoChange, or
 // Replace when an existing resource's spec disagrees with it on a field
 // that Update cannot reconcile (see diff.go). Rendering a Plan for a human
 // is a separate, optional step (render.go): the Plan itself carries only
 // structured data, so a caller can format it as plain text, JSON, or
 // anything else without recomputing the walk.
 //
+// # Ordering: a dependency graph, not fixed phases
+//
+// Wave replaces what used to be resource.Phase — three fixed, hardcoded
+// stages (database, storage, compute) run in sequence. That model ran out
+// against a real deployment: a fresh `kraai apply` against a live AWS
+// account took three runs to converge, because both AWS::Lambda::Permission
+// registrations shared PhaseCompute with the function and API Gateway they
+// authorize, with no ordering guarantee between any of them. It was also
+// already being used as a priority number rather than a category — an IAM
+// role and an S3 bucket declared PhaseStorage purely to run before the
+// function that needed them, neither being storage at all.
+//
+// graph.go's computeWaves builds a real dependency graph from every
+// resource.Registration.DependsOn (resolved to concrete instances within
+// each item's own expansion group) plus every manifest-level
+// service.DependsOn, and topologically sorts it with a layered Kahn's
+// algorithm: Wave 0 is everything with no dependency, and every other item
+// gets one more than the largest wave among the things it depends on. A
+// cycle is detected as Kahn's own well-known side effect (fewer nodes
+// sorted than exist) and reported as a validation error naming every
+// resource still unresolved, never silently dropped or partially ordered.
+//
 // # Partial failure
 //
 // A resource whose Get fails is reported, not dropped and not treated as
 // fatal to the whole run: it becomes an Action with ActionFailed and the
-// error that occurred, sitting in its correct phase position alongside
+// error that occurred, sitting in its correct wave position alongside
 // every resource that could be read. Planner.Plan itself only returns a
 // non-nil error for a failure that makes the walk itself impossible — an
 // unconfigured capability, an unresolvable vendor — never for a live I/O
@@ -50,10 +72,10 @@
 //
 // # Concurrency
 //
-// Get calls within a phase run concurrently, bounded by a single
+// Get calls within a wave run concurrently, bounded by a single
 // golang.org/x/sync/errgroup limit (D13) rather than one goroutine per
-// resource; phases themselves run in sequence, matching the order apply
-// will need for real (D31). The limit defaults to a modest value and is
+// resource; waves themselves run in sequence, matching the order apply
+// will need for real. The limit defaults to a modest value and is
 // configurable via WithConcurrency.
 //
 // # Capability expansion across providers (D30)

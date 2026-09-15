@@ -175,12 +175,12 @@ func writePlanText(w io.Writer, envName string, p *plan.Plan) error {
 	} else {
 		tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 
-		phase := p.Actions[0].Phase
-		_, _ = fmt.Fprintf(tw, "%s:\n", phase)
+		wave := p.Actions[0].Wave
+		_, _ = fmt.Fprintf(tw, "wave %d:\n", wave)
 		for _, a := range p.Actions {
-			if a.Phase != phase {
-				phase = a.Phase
-				_, _ = fmt.Fprintf(tw, "\n%s:\n", phase)
+			if a.Wave != wave {
+				wave = a.Wave
+				_, _ = fmt.Fprintf(tw, "\nwave %d:\n", wave)
 			}
 			_, _ = fmt.Fprintf(tw, "  %s\t%-9s\t%s\t%s/%s\t%s.%s", actionSymbol(a.Kind), a.Kind,
 				strconv.Quote(a.Ref.Name), a.Provider, a.Type, a.ServiceKey, a.Binding)
@@ -265,9 +265,25 @@ func summaryLine(envName string, c actionCounts) string {
 // json.Marshal of internal/plan's own types — for two reasons: Action.Err
 // is an error interface (a *kerrors.KError's fields are unexported, so it
 // would marshal to "{}" and silently lose the failure reason), and
-// resource.Phase/plan.ActionKind are integer enums whose numeric values
-// are an implementation detail a machine-readable contract should not
-// leak. Every field here is a plain string, int, or bool.
+// plan.ActionKind is an integer enum whose numeric value is an
+// implementation detail a machine-readable contract should not leak. Every
+// field here is a plain string, int, or bool.
+//
+// # Breaking change: "phase" is now "wave"
+//
+// This contract used to carry a "phase" string — one of "database",
+// "storage", "compute", the three fixed stages resource.Phase declared.
+// resource.Phase is gone (see resource.Registration.DependsOn's doc
+// comment for why), replaced by plan.Item.Wave: a zero-based integer,
+// derived per plan from the real dependency graph, with no fixed upper
+// bound and no name beyond its number. "wave" (int) is the direct
+// replacement — the obvious candidate once ordering is a computed integer
+// depth rather than one of three named stages, and the only field this
+// projection changes. A consumer of the old contract keyed on the literal
+// strings "database"/"storage"/"compute" breaks; one that only grouped or
+// sorted by the phase field's value keeps working against "wave" with the
+// same grouping/sorting logic, since both are still "the field that says
+// what runs together and in what order."
 type planDocument struct {
 	Environment string           `json:"environment"`
 	Summary     planSummaryJSON  `json:"summary"`
@@ -295,7 +311,7 @@ type planActionJSON struct {
 	Capability string `json:"capability"`
 	Provider   string `json:"provider"`
 	Type       string `json:"type"`
-	Phase      string `json:"phase"`
+	Wave       int    `json:"wave"`
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
 	Error      string `json:"error,omitempty"`
@@ -328,7 +344,7 @@ func toPlanDocument(envName string, p *plan.Plan) planDocument {
 			Capability: a.Capability,
 			Provider:   a.Provider,
 			Type:       a.Type,
-			Phase:      a.Phase.String(),
+			Wave:       a.Wave,
 			Name:       a.Ref.Name,
 			Kind:       a.Kind.String(),
 		}

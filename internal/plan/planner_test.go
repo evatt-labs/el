@@ -47,10 +47,11 @@ func TestPlan_CapabilityExpandsToMultipleTypes(t *testing.T) {
 		t.Fatalf("both expanded types should carry the postgres capability: branch=%q hyper=%q",
 			branch.Capability, hyper.Capability)
 	}
-	if branch.Phase != resource.PhaseDatabase || hyper.Phase != resource.PhaseStorage {
-		t.Fatalf("branch/hyperdrive phases = %v/%v, want database/storage", branch.Phase, hyper.Phase)
+	if branch.Wave != 0 || hyper.Wave != 1 {
+		t.Fatalf("branch/hyperdrive waves = %d/%d, want 0/1 — hyperdrive's DependsOn "+
+			"names the branch, so it must land exactly one wave later", branch.Wave, hyper.Wave)
 	}
-	// Phase ordering (D31): the branch must be planned before whatever
+	// Dependency-graph ordering: the branch must be planned before whatever
 	// fronts it.
 	branchIdx, hyperIdx := -1, -1
 	for i, a := range p.Actions {
@@ -134,7 +135,7 @@ func TestPlan_ImmutableDiffPlansAsReplace(t *testing.T) {
 	reg := resource.NewRegistry()
 	must(t, reg.Register(resource.Registration{
 		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
-		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: differ,
+		Lookup: resource.LookupByName, Resource: differ,
 	}))
 	m := &manifest.Manifest{
 		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
@@ -168,7 +169,7 @@ func TestPlan_ImmutableDiffErrorPlansAsFailed(t *testing.T) {
 	reg := resource.NewRegistry()
 	must(t, reg.Register(resource.Registration{
 		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
-		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: differ,
+		Lookup: resource.LookupByName, Resource: differ,
 	}))
 	m := &manifest.Manifest{
 		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
@@ -207,7 +208,7 @@ func TestPlan_SpecValidatorRunsOnActionCreate(t *testing.T) {
 	reg := resource.NewRegistry()
 	must(t, reg.Register(resource.Registration{
 		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
-		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: validator,
+		Lookup: resource.LookupByName, Resource: validator,
 	}))
 	m := &manifest.Manifest{
 		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
@@ -245,7 +246,7 @@ func TestPlan_SpecValidatorAlsoRunsWhenResourceExists(t *testing.T) {
 	reg := resource.NewRegistry()
 	must(t, reg.Register(resource.Registration{
 		Provider: "cloudflare", Type: "r2_bucket", Capability: manifest.CapabilityObjects,
-		Phase: resource.PhaseStorage, Lookup: resource.LookupByName, Resource: validator,
+		Lookup: resource.LookupByName, Resource: validator,
 	}))
 	m := &manifest.Manifest{
 		Root: manifest.Root{Providers: manifest.Providers{Objects: &manifest.Provider{Vendor: "cloudflare"}}},
@@ -491,7 +492,7 @@ func TestPlan_ComputeIncludeIsCarriedIntoConfig(t *testing.T) {
 	compute := newFakeResource()
 	if err := f.reg.Register(resource.Registration{
 		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
-		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+		Lookup: resource.LookupByName, Resource: compute,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +526,7 @@ func TestPlan_ComputeWithNoIncludeOmitsConfigKey(t *testing.T) {
 	compute := newFakeResource()
 	if err := f.reg.Register(resource.Registration{
 		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
-		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+		Lookup: resource.LookupByName, Resource: compute,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +689,7 @@ func TestEveryServiceIsPlannedAsDeployable(t *testing.T) {
 	compute := newFakeResource()
 	if err := f.reg.Register(resource.Registration{
 		Provider: "aws", Type: "AWS::Lambda::Function", Capability: manifest.CapabilityCompute,
-		Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: compute,
+		Lookup: resource.LookupByName, Resource: compute,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -765,5 +766,42 @@ func TestUnresolvableComputeFailsTheWalk(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "services.api") {
 		t.Fatalf("error should name the service it failed on: %v", err)
+	}
+}
+
+// TestPlan_ManifestDependsOn_OrdersOtherwiseIndependentServices is the
+// depends_on escape hatch's own end-to-end test: two services whose
+// resource types share no DependsOn edge at all (a KeyValue namespace and
+// an Objects bucket, two entirely different registrations) are still
+// ordered correctly once the manifest itself says "frontend" waits on
+// "backend" — proving manifest.Service.DependsOn reaches
+// internal/plan/graph.go's computeWaves through serviceDependsOn.
+func TestPlan_ManifestDependsOn_OrdersOtherwiseIndependentServices(t *testing.T) {
+	f := newRegistryFixture(t)
+	m := &manifest.Manifest{
+		Root: manifest.Root{Providers: manifest.Providers{
+			KeyValue: &manifest.Provider{Vendor: "cloudflare"},
+			Objects:  &manifest.Provider{Vendor: "cloudflare"},
+		}},
+		Services: map[string]manifest.Service{
+			"backend":  {KeyValue: []manifest.KeyValue{{Binding: "CACHE"}}},
+			"frontend": {Objects: []manifest.ObjectStore{{Binding: "UPLOADS"}}, DependsOn: []string{"backend"}},
+		},
+	}
+
+	p, err := New(f.reg).Plan(context.Background(), m, envName)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	backend := findAction(t, p, "cloudflare", "kv_namespace")
+	frontend := findAction(t, p, "cloudflare", "r2_bucket")
+
+	if backend.Wave != 0 {
+		t.Fatalf("backend wave = %d, want 0", backend.Wave)
+	}
+	if frontend.Wave != 1 {
+		t.Fatalf("frontend wave = %d, want 1: it depends_on backend, which has no type-level "+
+			"relationship to it at all — only the manifest's own depends_on orders them", frontend.Wave)
 	}
 }

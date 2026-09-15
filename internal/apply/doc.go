@@ -34,25 +34,31 @@
 //
 // # Execution order and failure semantics
 //
-// Phases run in sequence via resource.Phases() (database, then storage, then
-// compute), matching internal/plan and internal/resource/registry.go's
-// rationale for phases over a dependency graph. Within a phase, every action
-// runs concurrently under a single errgroup.Group with SetLimit, mirroring
-// internal/plan/planner.go's getPhase: one action's goroutine always returns
+// Waves run in ascending order via indexByWave, which derives the wave
+// count from the plan itself — plan.Action.Wave, computed by
+// internal/plan/graph.go's computeWaves from real dependency edges
+// (resource.Registration.DependsOn plus manifest-level depends_on), not
+// from a fixed set of named stages. This replaces the old three-phase
+// model (database, then storage, then compute) that internal/plan and
+// internal/resource/registry.go's Registration.DependsOn doc comment
+// records the reasoning for reversing. Within a wave, every action runs
+// concurrently under a single errgroup.Group with SetLimit, mirroring
+// internal/plan/planner.go's getWave: one action's goroutine always returns
 // nil to the group regardless of outcome, so one failure never cancels or
-// skips its siblings in the same phase.
+// skips its siblings in the same wave.
 //
-// Across phases, failure is not survived the same way: if any action in a
-// phase failed, the next phase does not start, and every action in every
-// later phase is reported as skipped rather than attempted. A compute
-// resource that binds to a database that failed to create must not be
+// Across waves, failure is not survived the same way: if any action in a
+// wave failed, the next wave does not start, and every action in every
+// later wave is reported as skipped rather than attempted. A compute
+// resource that depends on a database that failed to create must not be
 // deployed against a binding that does not exist.
 //
-// # Secrets and outputs cross phases scoped to (ServiceKey, Binding)
+// # Secrets and outputs cross waves scoped to (ServiceKey, Binding)
 //
-// A Neon branch (PhaseDatabase) produces a connection_uri secret; the
-// Cloudflare Hyperdrive configuration fronting it (PhaseStorage) consumes it
-// as spec.Secrets["connection_uri"]. Apply must not know what Hyperdrive or
+// A Neon branch produces a connection_uri secret; the Cloudflare Hyperdrive
+// configuration fronting it — one wave later, since its registration
+// depends on the branch's type — consumes it as
+// spec.Secrets["connection_uri"]. Apply must not know what Hyperdrive or
 // Neon are, so it cannot key that handoff on anything provider-specific.
 //
 // What it can rely on is that both resources were expanded from the same
@@ -63,7 +69,7 @@
 // Ref.Type differ. That is the vendor-neutral scope this package uses: a
 // secretIndex keyed by (ServiceKey, Binding), populated after every action
 // that implements resource.SecretProducer succeeds, and consulted before
-// every action in the same or a later phase to populate that action's own
+// every action in the same or a later wave to populate that action's own
 // Spec.Secrets.
 //
 // resource.Outputs already has a PutSecret/Secret pair, but it keys by Ref —
@@ -127,7 +133,7 @@
 //
 // # Known gap: sibling attributes, not just secrets
 //
-// resource.State.Attributes carries non-secret values a later phase may
+// resource.State.Attributes carries non-secret values a later wave may
 // need — a bucket name, a namespace id — and resource.Outputs already
 // stores them, keyed by Ref. But resource.Spec has no equivalent to
 // Secrets for attributes, so nothing analogous to this file's secret
@@ -155,15 +161,15 @@
 //
 // # Scope locking, within one run
 //
-// A phase's concurrent actions can still collide with each other even
+// A wave's concurrent actions can still collide with each other even
 // under D13's bounded concurrency, when the provider itself serializes by
 // something other than request count — Neon permits only one in-flight
 // mutation per project, discovered from a real `kraai apply` 423 (see
 // internal/resource/registry.go's Registration.Scope doc comment for the
 // failure and the fix). mutate resolves each action's scope via
 // Registration.ScopeFor and serializes the mutating call through a
-// resource.ScopeLocker shared across this Apply call's whole phase loop,
-// inside the same errgroup runPhase already bounds by count — the two
+// resource.ScopeLocker shared across this Apply call's whole wave loop,
+// inside the same errgroup runWave already bounds by count — the two
 // mechanisms compose rather than replace each other: D13 still caps how
 // many actions run at once, ScopeLocker additionally prevents two of them
 // that share a scope from running their provider calls at the same

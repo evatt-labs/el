@@ -20,12 +20,12 @@ func Render(p *Plan) string {
 	}
 
 	var b strings.Builder
-	phase := p.Actions[0].Phase
-	fmt.Fprintf(&b, "%s:\n", phase)
+	wave := p.Actions[0].Wave
+	fmt.Fprintf(&b, "wave %d:\n", wave)
 	for _, a := range p.Actions {
-		if a.Phase != phase {
-			phase = a.Phase
-			fmt.Fprintf(&b, "\n%s:\n", phase)
+		if a.Wave != wave {
+			wave = a.Wave
+			fmt.Fprintf(&b, "\nwave %d:\n", wave)
 		}
 		fmt.Fprintf(&b, "  %s %s (%s/%s, %s.%s)\n", symbol(a.Kind), describe(a), a.Provider, a.Type, a.ServiceKey, a.Binding)
 	}

@@ -101,16 +101,16 @@ func TestRegistrationsCoverTheCapability(t *testing.T) {
 	}
 
 	branch, ok := reg.Lookup("neon/branch")
-	if !ok || branch.Phase != resource.PhaseDatabase || branch.Capability != Capability {
+	if !ok || branch.Capability != Capability {
 		t.Fatalf("branch registration = %+v", branch)
 	}
 	hyper, ok := reg.Lookup("cloudflare/hyperdrive")
-	if !ok || hyper.Phase != resource.PhaseStorage || hyper.Capability != Capability {
+	if !ok || hyper.Capability != Capability || len(hyper.DependsOn) != 1 || hyper.DependsOn[0] != "neon/branch" {
 		t.Fatalf("hyperdrive registration = %+v", hyper)
 	}
 
-	// One capability expanding to two types, in phase order (D30, D31) — but
-	// only when the compute side is Cloudflare. Hyperdrive is a Workers
+	// One capability expanding to two types, in registration order (D30) —
+	// but only when the compute side is Cloudflare. Hyperdrive is a Workers
 	// connection pooler: a Lambda connects to the branch directly over the
 	// Postgres wire and would never route through it, so planning one for an
 	// AWS application demands a Cloudflare account that deployment has no
@@ -128,7 +128,7 @@ func TestRegistrationsCoverTheCapability(t *testing.T) {
 			"hyperdrive config fronting it", len(resolved))
 	}
 	if resolved[0].Type != TypeBranch || resolved[1].Type != TypeHyperdrive {
-		t.Fatalf("resolved out of phase order: %s then %s", resolved[0].Type, resolved[1].Type)
+		t.Fatalf("resolved out of registration order: %s then %s", resolved[0].Type, resolved[1].Type)
 	}
 
 	// The same database on AWS is the branch alone.

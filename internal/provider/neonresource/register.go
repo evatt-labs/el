@@ -22,8 +22,10 @@ func Register(reg *resource.Registry, neonClient *neon.Client, cfClient *cloudfl
 	return nil
 }
 
-// Registrations returns the database capability's registrations, in the phase
-// order they are applied.
+// Registrations returns the database capability's registrations. The
+// Hyperdrive companion below declares the branch as its DependsOn, so
+// internal/plan orders them correctly regardless of the order returned
+// here.
 //
 // A nil cfClient omits the Hyperdrive companion entirely. That is the same
 // rule its When condition expresses, answered one step earlier: a caller with
@@ -37,8 +39,10 @@ func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, setting
 		{
 			Provider: Provider, Type: TypeBranch,
 			Capability: Capability,
-			// First: everything that binds to a database needs it to exist.
-			Phase: resource.PhaseDatabase,
+			// No DependsOn: a branch is the root of this capability's own
+			// dependency chain — everything that binds to a database needs
+			// it to exist, nothing it needs to exist first.
+			//
 			// Listed and matched on branch name within the project.
 			Lookup: resource.LookupByAttr,
 			// Neon serializes mutations per project, not by request rate
@@ -69,9 +73,9 @@ func Registrations(neonClient *neon.Client, cfClient *cloudflare.Client, setting
 		// nothing will ever connect through.
 		When: resource.RequiresCapabilityVendor(manifest.CapabilityCompute, HyperdriveProvider),
 		// After the branch, whose connection string it consumes.
-		Phase:    resource.PhaseStorage,
-		Lookup:   resource.LookupByAttr,
-		Resource: &hyperdriveResource{client: cfClient},
+		DependsOn: []string{Provider + "/" + TypeBranch},
+		Lookup:    resource.LookupByAttr,
+		Resource:  &hyperdriveResource{client: cfClient},
 	})
 }
 
