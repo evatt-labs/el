@@ -18,6 +18,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
+	"github.com/evatt-labs/kraai/internal/httpx"
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
 
@@ -191,7 +192,20 @@ func WithPollTimings(initialDelay, maxDelay, timeout time.Duration) Option {
 // reads no AWS credential itself, per D18's "external touchpoints own their
 // own auth").
 func New(ctx context.Context, settings Settings, opts ...Option) (*Client, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(settings.Region))
+	// awsconfig.WithHTTPClient (D13): the SDK builds its own HTTP client per
+	// service (cloudcontrol, cloudformation, s3, sts) unless told otherwise,
+	// which is a fifth independently-pooled client alongside
+	// internal/reachability, internal/provider/neon and
+	// internal/provider/cloudflare. httpx.NewClient's *http.Client satisfies
+	// the SDK's minimal HTTPClient interface (a Do(*http.Request) method),
+	// so this puts every AWS call through the same shared pool and the same
+	// otelhttp instrumentation as everything else, without replacing any of
+	// the SDK's own retry or credential-resolution behaviour — WithHTTPClient
+	// only substitutes the transport those layers run on top of.
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(settings.Region),
+		awsconfig.WithHTTPClient(httpx.NewClient(60*time.Second, nil, nil)),
+	)
 	if err != nil {
 		// LoadDefaultConfig's error can name a credential file path but never
 		// a credential value, so wrapping it is safe.
