@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
@@ -826,6 +828,23 @@ func TestClientDeleteResource(t *testing.T) {
 type fakeS3 struct {
 	err  error
 	reqs []*s3.PutObjectInput
+
+	// listOut/listErr/listAt script ListObjectsV2 responses, one entry per
+	// call in order — the same sequential-page pattern fakeCC's
+	// listOut/listAt already use for ListResources. The last entry repeats
+	// once exhausted.
+	listOut []*s3.ListObjectsV2Output
+	listErr error
+	listAt  int
+	listReq []*s3.ListObjectsV2Input
+
+	// deleteObjectsOut/deleteObjectsErr script every DeleteObjects call
+	// identically: EmptyBucket's tests never need per-call variation here,
+	// only whether a batch succeeded, partially failed (via Errors on the
+	// output), or errored outright.
+	deleteObjectsOut *s3.DeleteObjectsOutput
+	deleteObjectsErr error
+	deleteObjectsReq []*s3.DeleteObjectsInput
 }
 
 func (f *fakeS3) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
@@ -834,6 +853,32 @@ func (f *fakeS3) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...fu
 		return nil, f.err
 	}
 	return &s3.PutObjectOutput{}, nil
+}
+
+func (f *fakeS3) ListObjectsV2(_ context.Context, params *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	f.listReq = append(f.listReq, params)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if len(f.listOut) == 0 {
+		return &s3.ListObjectsV2Output{}, nil
+	}
+	out := f.listOut[f.listAt]
+	if f.listAt < len(f.listOut)-1 {
+		f.listAt++
+	}
+	return out, nil
+}
+
+func (f *fakeS3) DeleteObjects(_ context.Context, params *s3.DeleteObjectsInput, _ ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	f.deleteObjectsReq = append(f.deleteObjectsReq, params)
+	if f.deleteObjectsErr != nil {
+		return nil, f.deleteObjectsErr
+	}
+	if f.deleteObjectsOut != nil {
+		return f.deleteObjectsOut, nil
+	}
+	return &s3.DeleteObjectsOutput{}, nil
 }
 
 // fakeSTS is a hand-rolled stsAPI: no AWS account, no network (D21).
@@ -871,6 +916,144 @@ func TestClientPutObject(t *testing.T) {
 		c := &Client{s3: &fakeS3{err: errors.New("access denied")}}
 		if err := c.PutObject(context.Background(), "b", "k", nil); err == nil {
 			t.Fatal("expected an error")
+		}
+	})
+}
+
+// objectPage builds a ListObjectsV2Output listing n synthetic keys
+// (prefixed key-0, key-1, ...), optionally truncated with a continuation
+// token to the next page.
+func objectPage(n int, truncated bool, nextToken string) *s3.ListObjectsV2Output {
+	contents := make([]s3types.Object, n)
+	for i := range contents {
+		contents[i] = s3types.Object{Key: aws.String("key-" + strconv.Itoa(i))}
+	}
+	out := &s3.ListObjectsV2Output{Contents: contents, IsTruncated: aws.Bool(truncated)}
+	if nextToken != "" {
+		out.NextContinuationToken = aws.String(nextToken)
+	}
+	return out
+}
+
+func TestClientEmptyBucket(t *testing.T) {
+	t.Run("empties a bucket with objects, then succeeds", func(t *testing.T) {
+		fs3 := &fakeS3{listOut: []*s3.ListObjectsV2Output{objectPage(3, false, "")}}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "my-bucket"); err != nil {
+			t.Fatalf("EmptyBucket: %v", err)
+		}
+		if len(fs3.deleteObjectsReq) != 1 {
+			t.Fatalf("got %d DeleteObjects calls, want 1", len(fs3.deleteObjectsReq))
+		}
+		if got := len(fs3.deleteObjectsReq[0].Delete.Objects); got != 3 {
+			t.Fatalf("deleted %d objects, want 3", got)
+		}
+		if *fs3.deleteObjectsReq[0].Bucket != "my-bucket" {
+			t.Fatalf("Bucket = %q, want %q", *fs3.deleteObjectsReq[0].Bucket, "my-bucket")
+		}
+	})
+
+	t.Run("pages through more than one page of listing, deleting every key", func(t *testing.T) {
+		// Naively reading only the first page would leave page two's keys
+		// behind and the bucket non-empty — exactly the bug this test
+		// guards against; see this test's revert-and-fail run in the PR
+		// description.
+		fs3 := &fakeS3{listOut: []*s3.ListObjectsV2Output{
+			objectPage(2, true, "page-2"),
+			objectPage(2, false, ""),
+		}}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "my-bucket"); err != nil {
+			t.Fatalf("EmptyBucket: %v", err)
+		}
+		if len(fs3.listReq) != 2 {
+			t.Fatalf("got %d ListObjectsV2 calls, want 2", len(fs3.listReq))
+		}
+		if fs3.listReq[1].ContinuationToken == nil || *fs3.listReq[1].ContinuationToken != "page-2" {
+			t.Fatalf("second ListObjectsV2 call's ContinuationToken = %v, want %q", fs3.listReq[1].ContinuationToken, "page-2")
+		}
+		if len(fs3.deleteObjectsReq) != 2 {
+			t.Fatalf("got %d DeleteObjects calls, want 2 (one per page)", len(fs3.deleteObjectsReq))
+		}
+		total := len(fs3.deleteObjectsReq[0].Delete.Objects) + len(fs3.deleteObjectsReq[1].Delete.Objects)
+		if total != 4 {
+			t.Fatalf("deleted %d objects total across both pages, want 4", total)
+		}
+	})
+
+	t.Run("more than 1000 keys issues more than one DeleteObjects batch", func(t *testing.T) {
+		fs3 := &fakeS3{listOut: []*s3.ListObjectsV2Output{
+			objectPage(1000, true, "page-2"),
+			objectPage(50, false, ""),
+		}}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "my-bucket"); err != nil {
+			t.Fatalf("EmptyBucket: %v", err)
+		}
+		if len(fs3.deleteObjectsReq) != 2 {
+			t.Fatalf("got %d DeleteObjects calls, want 2", len(fs3.deleteObjectsReq))
+		}
+		for i, req := range fs3.deleteObjectsReq {
+			if len(req.Delete.Objects) > 1000 {
+				t.Fatalf("DeleteObjects call %d carried %d keys, exceeds S3's 1000-key ceiling", i, len(req.Delete.Objects))
+			}
+		}
+		if got := len(fs3.deleteObjectsReq[0].Delete.Objects); got != 1000 {
+			t.Fatalf("first batch = %d keys, want 1000", got)
+		}
+		if got := len(fs3.deleteObjectsReq[1].Delete.Objects); got != 50 {
+			t.Fatalf("second batch = %d keys, want 50", got)
+		}
+	})
+
+	t.Run("an already-absent bucket is success, not an error", func(t *testing.T) {
+		fs3 := &fakeS3{listErr: &s3types.NoSuchBucket{}}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "gone-bucket"); err != nil {
+			t.Fatalf("EmptyBucket on an absent bucket: %v, want nil (already gone is success)", err)
+		}
+		if len(fs3.deleteObjectsReq) != 0 {
+			t.Fatal("expected no DeleteObjects call against a bucket that does not exist")
+		}
+	})
+
+	t.Run("a listing error surfaces rather than being swallowed", func(t *testing.T) {
+		fs3 := &fakeS3{listErr: errors.New("throttled")}
+		c := &Client{s3: fs3}
+
+		err := c.EmptyBucket(context.Background(), "my-bucket")
+		if err == nil {
+			t.Fatal("expected a throttling error during listing to be reported, not treated as absence")
+		}
+	})
+
+	t.Run("a delete error surfaces rather than being swallowed", func(t *testing.T) {
+		fs3 := &fakeS3{
+			listOut:          []*s3.ListObjectsV2Output{objectPage(1, false, "")},
+			deleteObjectsErr: errors.New("access denied"),
+		}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "my-bucket"); err == nil {
+			t.Fatal("expected a DeleteObjects failure to be reported")
+		}
+	})
+
+	t.Run("a per-object failure inside an otherwise successful DeleteObjects response surfaces", func(t *testing.T) {
+		fs3 := &fakeS3{
+			listOut: []*s3.ListObjectsV2Output{objectPage(1, false, "")},
+			deleteObjectsOut: &s3.DeleteObjectsOutput{
+				Errors: []s3types.Error{{Key: aws.String("key-0"), Code: aws.String("AccessDenied"), Message: aws.String("denied")}},
+			},
+		}
+		c := &Client{s3: fs3}
+
+		if err := c.EmptyBucket(context.Background(), "my-bucket"); err == nil {
+			t.Fatal("expected a per-object DeleteObjects failure reported in the response body to be surfaced")
 		}
 	})
 }

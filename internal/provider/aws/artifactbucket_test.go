@@ -2,8 +2,12 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/evatt-labs/kraai/internal/resource"
 )
@@ -37,8 +41,10 @@ func TestArtifactBucketResourceRewritesNameBothWays(t *testing.T) {
 		createProps:  map[string]any{"BucketName": realBucket},
 		schema:       Schema{PrimaryIdentifier: []string{"/properties/BucketName"}},
 	}
+	fs3 := &fakeS3{listOut: []*s3.ListObjectsV2Output{{}}}
 	bucket := &artifactBucketResource{
-		inner: &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
+		inner:  &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
+		client: &Client{s3: fs3},
 	}
 
 	t.Run("Get resolves the real bucket name but reports the service Ref", func(t *testing.T) {
@@ -87,9 +93,17 @@ func TestArtifactBucketResourceRewritesNameBothWays(t *testing.T) {
 		}
 	})
 
-	t.Run("Delete resolves the real bucket name", func(t *testing.T) {
+	t.Run("Delete resolves the real bucket name, emptying it before deleting it", func(t *testing.T) {
+		// fs3's listOut ({{}}: no Contents) means the bucket is already
+		// empty on entry, so a lone DeleteObjects assertion here would not
+		// distinguish "emptying happened" from "emptying was skipped
+		// entirely" — see TestArtifactBucketDeleteEmptiesBeforeDeleting
+		// below for the case with real objects to empty.
 		if err := bucket.Delete(context.Background(), resource.Ref{Name: serviceName}); err != nil {
 			t.Fatalf("Delete: %v", err)
+		}
+		if len(fs3.listReq) == 0 || *fs3.listReq[len(fs3.listReq)-1].Bucket != realBucket {
+			t.Fatalf("ListObjectsV2 called with %v, want %q", fs3.listReq, realBucket)
 		}
 		if len(fc.deleteCalls) == 0 || fc.deleteCalls[len(fc.deleteCalls)-1] != realBucket {
 			t.Fatalf("DeleteResource called with %v, want %q", fc.deleteCalls, realBucket)
@@ -101,4 +115,99 @@ func TestArtifactBucketResourceRewritesNameBothWays(t *testing.T) {
 			t.Fatal("expected Update to be refused")
 		}
 	})
+}
+
+// TestArtifactBucketDeleteEmptiesBeforeDeleting is the direct regression
+// test for the live failure this workstream exists to fix: a real `kraai
+// destroy` against a live AWS account left every artifact bucket behind
+// because Delete used to forward straight to the generic Cloud Control
+// engine with no emptying step, and S3 refuses to delete a non-empty
+// bucket (409 GeneralServiceException, "The bucket you tried to delete is
+// not empty"). A bucket that genuinely holds objects must have every one
+// of them removed via DeleteObjects before DeleteResource is ever called.
+//
+// Reverting the fix (commenting out the EmptyBucket call in Delete) turns
+// this test red with:
+//
+//	deleted 0 objects across all DeleteObjects calls, want 1
+//
+// confirming this test actually exercises the emptying step rather than
+// passing regardless — see this workstream's PR description for that run.
+func TestArtifactBucketDeleteEmptiesBeforeDeleting(t *testing.T) {
+	const serviceName = "myenv-api"
+	const realBucket = "myenv-api-artifacts"
+
+	fc := &fakeClient{byIdentifier: map[string]map[string]any{realBucket: {"BucketName": realBucket}}}
+	fs3 := &fakeS3{listOut: []*s3.ListObjectsV2Output{objectPage(3, false, "")}}
+	bucket := &artifactBucketResource{
+		inner:  &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
+		client: &Client{s3: fs3},
+	}
+
+	if err := bucket.Delete(context.Background(), resource.Ref{Name: serviceName}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var deletedObjects int
+	for _, req := range fs3.deleteObjectsReq {
+		deletedObjects += len(req.Delete.Objects)
+	}
+	if deletedObjects != 3 {
+		t.Fatalf("deleted %d objects across all DeleteObjects calls, want 3", deletedObjects)
+	}
+	if len(fc.deleteCalls) == 0 || fc.deleteCalls[len(fc.deleteCalls)-1] != realBucket {
+		t.Fatalf("DeleteResource called with %v, want %q — emptying must not skip the underlying bucket delete", fc.deleteCalls, realBucket)
+	}
+}
+
+// TestArtifactBucketDeleteSurfacesEmptyingFailures proves a real failure
+// while emptying the bucket (access denied, throttling, ...) is reported
+// and stops the underlying Cloud Control delete from running at all —
+// deleting a bucket kraai failed to fully empty would only trade "left
+// behind, still full" for "left behind, silently emptied of the wrong
+// keys or partially emptied," neither of which this workstream's brief
+// permits (destroy must surface a real failure, never swallow it as if it
+// meant absence).
+func TestArtifactBucketDeleteSurfacesEmptyingFailures(t *testing.T) {
+	const serviceName = "myenv-api"
+	const realBucket = "myenv-api-artifacts"
+
+	fc := &fakeClient{byIdentifier: map[string]map[string]any{realBucket: {"BucketName": realBucket}}}
+	fs3 := &fakeS3{listErr: errors.New("access denied")}
+	bucket := &artifactBucketResource{
+		inner:  &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
+		client: &Client{s3: fs3},
+	}
+
+	if err := bucket.Delete(context.Background(), resource.Ref{Name: serviceName}); err == nil {
+		t.Fatal("expected an emptying failure to be reported, not swallowed")
+	}
+	if len(fc.deleteCalls) != 0 {
+		t.Fatalf("DeleteResource was called (%v) despite emptying having failed; the bucket delete must not proceed", fc.deleteCalls)
+	}
+}
+
+// TestArtifactBucketDeleteOnAbsentBucket proves the "already gone" path
+// through EmptyBucket (a NoSuchBucket on listing) still reaches
+// DeleteResource, exactly as resource.Resource.Delete's own contract
+// requires: deleting something already absent is success, and this must
+// hold whether the bucket was never created or was already fully torn
+// down by a previous, partially-failed destroy run.
+func TestArtifactBucketDeleteOnAbsentBucket(t *testing.T) {
+	const serviceName = "myenv-api"
+	const realBucket = "myenv-api-artifacts"
+
+	fc := &fakeClient{byIdentifier: map[string]map[string]any{realBucket: {"BucketName": realBucket}}}
+	fs3 := &fakeS3{listErr: &s3types.NoSuchBucket{}}
+	bucket := &artifactBucketResource{
+		inner:  &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc},
+		client: &Client{s3: fs3},
+	}
+
+	if err := bucket.Delete(context.Background(), resource.Ref{Name: serviceName}); err != nil {
+		t.Fatalf("Delete on an already-absent bucket: %v, want nil", err)
+	}
+	if len(fc.deleteCalls) == 0 || fc.deleteCalls[len(fc.deleteCalls)-1] != realBucket {
+		t.Fatalf("DeleteResource called with %v, want %q", fc.deleteCalls, realBucket)
+	}
 }
