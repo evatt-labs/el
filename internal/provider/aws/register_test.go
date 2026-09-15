@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/evatt-labs/kraai/internal/manifest"
@@ -274,5 +275,46 @@ func TestRegistrationsGetThroughTheRegistry(t *testing.T) {
 	}
 	if state == nil || state.ID != "my-function" {
 		t.Fatalf("state = %+v", state)
+	}
+}
+
+// TestPermissionRegistrationsDeclareAListScope pins the fix for a real
+// `kraai plan` failure against a live account: both TypePermissionEventsRule
+// and TypePermissionAPIGateway drive AWS::Lambda::Permission, whose Cloud
+// Control list handler is parent-scoped and rejects an unscoped
+// ListResources call outright (see Client.ListResources's own doc comment
+// for the real API error). Both registrations must wire a listScope that
+// resolves to the invoking function's own derived name, not leave
+// resourceType's engine to send the unscoped request that originally
+// failed.
+func TestPermissionRegistrationsDeclareAListScope(t *testing.T) {
+	regs := Registrations(&Client{})
+	for _, typeName := range []string{TypePermissionEventsRule, TypePermissionAPIGateway} {
+		t.Run(typeName, func(t *testing.T) {
+			var reg *resource.Registration
+			for i := range regs {
+				if regs[i].Type == typeName {
+					reg = &regs[i]
+				}
+			}
+			if reg == nil {
+				t.Fatalf("no registration found for %s", typeName)
+			}
+			perm, ok := reg.Resource.(*lambdaPermissionResource)
+			if !ok {
+				t.Fatalf("Resource = %T, want *lambdaPermissionResource", reg.Resource)
+			}
+			if perm.inner.listScope == nil {
+				t.Fatal("listScope is nil — this registration would send an unscoped ListResources request, exactly the failure this fix closes")
+			}
+			model, err := perm.inner.listScope("myenv-api")
+			if err != nil {
+				t.Fatalf("listScope: %v", err)
+			}
+			want := map[string]any{"FunctionName": "myenv-api"}
+			if !reflect.DeepEqual(model, want) {
+				t.Fatalf("listScope(%q) = %+v, want %+v", "myenv-api", model, want)
+			}
+		})
 	}
 }

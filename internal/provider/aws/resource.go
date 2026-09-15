@@ -19,8 +19,13 @@ type ccAPI interface {
 	// for the absence-versus-failure contract this must preserve.
 	GetResource(ctx context.Context, typeName, identifier string) (properties map[string]any, found bool, err error)
 	// ListResources returns the primary identifier of every instance of
-	// typeName.
-	ListResources(ctx context.Context, typeName string) ([]string, error)
+	// typeName. resourceModel is nil for a type whose list handler enumerates
+	// every instance in the account/region unscoped; non-nil for a
+	// parent-scoped type (resourceType.listScope), whose list handler
+	// requires it and reports the scoping parent's own absence as
+	// ResourceNotFoundException rather than an empty result — see
+	// Client.ListResources for how that is translated back to absence.
+	ListResources(ctx context.Context, typeName string, resourceModel map[string]any) ([]string, error)
 	// CreateResource submits desiredState and polls to a terminal state,
 	// returning the provider-assigned identifier and resulting properties.
 	CreateResource(ctx context.Context, typeName string, desiredState map[string]any) (identifier string, properties map[string]any, err error)
@@ -42,6 +47,34 @@ type ccAPI interface {
 // stored in the matched attribute directly — see cloudfrontMatch and
 // apigatewayv2Match in identity.go for what each type actually compares.
 type matchFunc func(properties map[string]any, name string) bool
+
+// listScopeFunc builds the ResourceModel a parent-scoped type's ListResources
+// call must carry, from the derived name resolve is already looking an
+// instance up by. The counterpart to matchFunc, at the opposite end of the
+// same walk: matchFunc filters candidates ListResources already returned;
+// listScopeFunc decides what ListResources is even allowed to be called
+// with in the first place.
+//
+// # Why a per-type function, not a per-type table in this file
+//
+// AWS::Lambda::Permission is not the only Cloud Control type whose list
+// handler is scoped to a parent rather than enumerating an account/region —
+// it is simply the one a real `kraai plan` run against a live account
+// (409032463870) found first. A hardcoded "this TypeName needs that
+// property" table would need a new entry, in this generic file, every time
+// a future type turns out to share the same shape — exactly the
+// per-type-table failure mode stampTag and LookupStrategy (D26) already
+// exist to avoid for identity. Declaring the scope as a function on the
+// registration instead keeps this file's only knowledge of the concept
+// "some types need a scoped list," never which types or which property.
+//
+// Returns an error rather than a bare map so a type that cannot populate
+// its own declared scope (see lambdaPermissionListScope's empty-name case)
+// fails loudly through resolve rather than resolve silently falling back to
+// an unscoped ListResources call — a request Cloud Control has already been
+// observed to reject outright for a parent-scoped type (see this package's
+// PR description for the real ListResources error this closes).
+type listScopeFunc func(name string) (map[string]any, error)
 
 // resourceType adapts one Cloud Control-backed AWS resource type to the
 // resource contract (D15). One value of this type per registry entry in
@@ -68,6 +101,14 @@ type resourceType struct {
 	// because not every byTag type spells "Tags" the same way (see
 	// identity.go's array-shaped versus flat-map-shaped Tags).
 	stampTag stampFunc
+
+	// listScope is non-nil exactly for a type whose Cloud Control list
+	// handler is parent-scoped (see listScopeFunc's own doc comment) — for
+	// example AWS::Lambda::Permission, whose list handler requires a
+	// ResourceModel naming the FunctionName whose permissions to list. nil
+	// for every other type, which behaves exactly as before this field
+	// existed: resolve calls ListResources with no ResourceModel at all.
+	listScope listScopeFunc
 
 	// schemaMu, schema and schemaLoaded cache this type's CloudFormation
 	// resource-provider schema for the process's lifetime (Client.DescribeType's
@@ -159,12 +200,42 @@ func (r *resourceType) Get(ctx context.Context, ref resource.Ref) (*resource.Sta
 // because ListResources does not reliably carry the attribute being matched
 // (see Client.ListResources); calling GetResource per candidate is the only
 // way to test against properties Cloud Control actually guarantees.
+//
+// When this type declares listScope (a parent-scoped type — see
+// listScopeFunc's own doc comment), the ListResources call itself must carry
+// a ResourceModel naming the parent, or Cloud Control rejects the call
+// outright rather than returning an empty list — verified against a live
+// account: AWS::Lambda::Permission::ListResources with no ResourceModel
+// returns InvalidRequestException ("Missing or invalid ResourceModel
+// property... Required property: (#: required key [FunctionName] not
+// found)"), the exact failure this method exists to close. A type with no
+// listScope is unaffected: resourceModel stays nil and ListResources is
+// called exactly as it always was.
 func (r *resourceType) resolve(ctx context.Context, name string) (identifier string, properties map[string]any, found bool, err error) {
 	if r.lookup == resource.LookupByName {
 		return name, nil, true, nil
 	}
 
-	candidates, err := r.client.ListResources(ctx, r.typeName)
+	var resourceModel map[string]any
+	if r.listScope != nil {
+		resourceModel, err = r.listScope(name)
+		if err != nil {
+			return "", nil, false, err
+		}
+		if len(resourceModel) == 0 {
+			// listScope reported success but produced nothing to scope
+			// with — a bug in the declared listScope, not a legitimate
+			// "no scope needed" case (that is nil listScope, checked
+			// above). Refuse rather than silently falling through to the
+			// unscoped ListResources call this method exists to stop
+			// making for parent-scoped types.
+			return "", nil, false, kerrors.Validation(
+				"%s declares a list scope but it produced no resource model for %q; refusing to send an unscoped ListResources request",
+				r.typeName, name)
+		}
+	}
+
+	candidates, err := r.client.ListResources(ctx, r.typeName, resourceModel)
 	if err != nil {
 		return "", nil, false, err
 	}

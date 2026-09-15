@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,6 +22,11 @@ type fakeClient struct {
 	listErr      error
 	getCalls     []string
 	listCalls    int
+	// listModels records the resourceModel passed to every ListResources
+	// call, in order, so a test can assert a parent-scoped type's request
+	// actually carried the right scope (or that a non-parent-scoped type's
+	// request carried none at all).
+	listModels []map[string]any
 
 	createID    string
 	createProps map[string]any
@@ -52,8 +58,9 @@ func (f *fakeClient) GetResource(_ context.Context, _ string, identifier string)
 	return props, true, nil
 }
 
-func (f *fakeClient) ListResources(context.Context, string) ([]string, error) {
+func (f *fakeClient) ListResources(_ context.Context, _ string, resourceModel map[string]any) ([]string, error) {
 	f.listCalls++
+	f.listModels = append(f.listModels, resourceModel)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -216,6 +223,95 @@ func TestResourceTypeGetByAttr(t *testing.T) {
 
 		if _, err := r.Get(context.Background(), resource.Ref{Name: "target"}); err == nil {
 			t.Fatal("expected the GetResource failure to be reported")
+		}
+	})
+}
+
+// TestResourceTypeResolveListScope covers resolve's parent-scoped list
+// path (resourceType.listScope): a type that declares one must carry the
+// scope's resource model into ListResources; a type that does not must
+// keep sending an unscoped request exactly as before this mechanism
+// existed; and a listScope that cannot populate itself must refuse loudly
+// rather than fall back to an unscoped call.
+func TestResourceTypeResolveListScope(t *testing.T) {
+	t.Run("a parent-scoped type's list request carries the declared resource model", func(t *testing.T) {
+		fc := &fakeClient{
+			list:         []string{"perm1"},
+			byIdentifier: map[string]map[string]any{"perm1": {"FunctionName": "myenv-api"}},
+		}
+		r := &resourceType{
+			provider: Provider, typeName: realTypeLambdaPermission, lookup: resource.LookupByAttr,
+			client: fc, match: lambdaPermissionMatch, listScope: lambdaPermissionListScope,
+		}
+
+		state, err := r.Get(context.Background(), resource.Ref{Name: "myenv-api"})
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if state == nil || state.ID != "perm1" {
+			t.Fatalf("state = %+v", state)
+		}
+		if len(fc.listModels) != 1 {
+			t.Fatalf("listModels = %+v, want exactly one ListResources call", fc.listModels)
+		}
+		want := map[string]any{"FunctionName": "myenv-api"}
+		if !reflect.DeepEqual(fc.listModels[0], want) {
+			t.Fatalf("resourceModel = %+v, want %+v", fc.listModels[0], want)
+		}
+	})
+
+	t.Run("a non-parent-scoped type's list request carries no resource model", func(t *testing.T) {
+		fc := &fakeClient{
+			list:         []string{"cand-1"},
+			byIdentifier: map[string]map[string]any{"cand-1": {"Name": "target"}},
+		}
+		r := &resourceType{provider: Provider, typeName: TypeCloudFrontDistribution, lookup: resource.LookupByAttr, client: fc, match: matchNameField}
+
+		if _, err := r.Get(context.Background(), resource.Ref{Name: "target"}); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if len(fc.listModels) != 1 || fc.listModels[0] != nil {
+			t.Fatalf("listModels = %+v, want a single nil entry — no extra API call shape for a type with no listScope", fc.listModels)
+		}
+	})
+
+	t.Run("a listScope that errors is reported, never silently sent unscoped", func(t *testing.T) {
+		fc := &fakeClient{list: []string{"perm1"}}
+		wantErr := errors.New("cannot resolve parent")
+		r := &resourceType{
+			provider: Provider, typeName: realTypeLambdaPermission, lookup: resource.LookupByAttr,
+			client: fc, match: lambdaPermissionMatch,
+			listScope: func(string) (map[string]any, error) { return nil, wantErr },
+		}
+
+		if _, err := r.Get(context.Background(), resource.Ref{Name: "myenv-api"}); !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want %v", err, wantErr)
+		}
+		if fc.listCalls != 0 {
+			t.Fatalf("listCalls = %d, want 0 — a failed listScope must never reach ListResources", fc.listCalls)
+		}
+	})
+
+	t.Run("a listScope that produces an empty model refuses rather than falling back to unscoped", func(t *testing.T) {
+		fc := &fakeClient{list: []string{"perm1"}}
+		r := &resourceType{
+			provider: Provider, typeName: realTypeLambdaPermission, lookup: resource.LookupByAttr,
+			client: fc, match: lambdaPermissionMatch,
+			listScope: func(string) (map[string]any, error) { return map[string]any{}, nil },
+		}
+
+		_, err := r.Get(context.Background(), resource.Ref{Name: "myenv-api"})
+		if err == nil {
+			t.Fatal("expected an empty resource model from a declared listScope to be refused")
+		}
+		if fc.listCalls != 0 {
+			t.Fatalf("listCalls = %d, want 0 — refusing must happen before ListResources is ever called", fc.listCalls)
+		}
+	})
+
+	t.Run("lambdaPermissionListScope itself refuses an empty name", func(t *testing.T) {
+		if _, err := lambdaPermissionListScope(""); err == nil {
+			t.Fatal("expected an empty derived name to be refused")
 		}
 	})
 }

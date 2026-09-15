@@ -125,12 +125,39 @@ func newLambdaPermissionResource(client *Client, principal string, sourceARN sou
 	return &lambdaPermissionResource{
 		inner: &resourceType{
 			provider: Provider, typeName: realTypeLambdaPermission, lookup: resource.LookupByAttr,
-			client: client, match: lambdaPermissionMatch,
+			client: client, match: lambdaPermissionMatch, listScope: lambdaPermissionListScope,
 		},
 		client:    client,
 		principal: principal,
 		sourceARN: sourceARN,
 	}
+}
+
+// lambdaPermissionListScope declares AWS::Lambda::Permission's list scope
+// (resourceType.listScope): its Cloud Control list handler is scoped to a
+// parent function and requires a ResourceModel naming it — verified
+// directly against Cloud Control on a live account; see
+// Client.ListResources's own doc comment for the exact request and
+// response this closes.
+//
+// name is always the function's own derived name here, never a separate
+// lookup: both permission registrations (TypePermissionEventsRule,
+// TypePermissionAPIGateway) plan under the identical derived name
+// TypeLambdaFunction itself uses — internal/plan's expandCompute derives
+// one name, naming.ServiceName(environment, service), and hands it to
+// every compute registration for that service, this one included. resolve
+// is therefore already looking an instance up by exactly the FunctionName
+// its list must be scoped to; nothing here performs I/O of its own.
+func lambdaPermissionListScope(name string) (map[string]any, error) {
+	if name == "" {
+		// Unreachable in practice — expandCompute never derives an empty
+		// service name — but refused explicitly (Rule 20) rather than
+		// silently building a ResourceModel Cloud Control would reject on
+		// its own terms anyway.
+		return nil, kerrors.Validation(
+			"cannot scope an %s list without a derived function name", realTypeLambdaPermission)
+	}
+	return map[string]any{"FunctionName": name}, nil
 }
 
 func (p *lambdaPermissionResource) translate(ctx context.Context, spec resource.Spec) (resource.Spec, error) {
