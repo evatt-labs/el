@@ -45,7 +45,7 @@ func TestLambdaFunctionCreatePackagesUploadsAndWiresProperties(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	_, sha256Hex, err := buildArtifact(dir)
+	_, sha256Hex, err := buildArtifact(dir, nil)
 	if err != nil {
 		t.Fatalf("buildArtifact: %v", err)
 	}

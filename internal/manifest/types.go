@@ -193,6 +193,29 @@ type Compute struct {
 	// Settings does (D34, D5): uninterpreted here, decoded and validated by
 	// the compute provider.
 	Settings map[string]any `yaml:"settings,omitempty"`
+	// Include re-adds paths dir's own .gitignore excludes to this service's
+	// packaged deployment artifact (aws-provider-compute's Lambda zip, and
+	// any future compute provider that packages a directory the same way).
+	//
+	// A compute provider packaging a service directory defaults to
+	// excluding whatever that directory's own .gitignore excludes — but
+	// .gitignore is not a deployment manifest. A service's build output
+	// (build/, requirements.txt for kraai-api's own Lambda packaging) is
+	// routinely gitignored precisely because it must never be committed,
+	// yet it is exactly what the deployed artifact needs to contain.
+	// Without this escape hatch, naive .gitignore obedience would exclude
+	// the artifact's own contents.
+	//
+	// Each entry is a gitignore-syntax pattern (e.g. "build/",
+	// "requirements.txt"), matched against paths under dir the same way a
+	// .gitignore line would be, just with the opposite default sense: it
+	// re-adds a path the .gitignore excluded. It never overrides a
+	// packaging provider's own unconditional denies (kraai-provider-aws's
+	// ".git/" and ".env*", for instance) — those exist specifically so a
+	// credential or the source control directory reaching an artifact does
+	// not depend on a manifest author remembering, or choosing, to keep it
+	// out.
+	Include []string `yaml:"include,omitempty"`
 }
 
 // TriggerHTTP and TriggerSchedule are Compute's only valid Trigger values.
