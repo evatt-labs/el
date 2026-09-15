@@ -241,6 +241,23 @@ func do[T any](ctx context.Context, c *Client, req request) (T, error) {
 			return result, nil
 		}
 		if !retryable(req.method, status) {
+			// A failure caused by this call's own retry deadline expiring
+			// mid-request is not a separate kind of failure: it is the retry
+			// giving up. attempt reports a transport error as status 0, which
+			// is never retryable, so without this check the loop returns a
+			// bare "request failed" and drops the last real status — the one
+			// detail an operator needs to tell a locked project apart from a
+			// network fault.
+			//
+			// This was not theoretical: the case below was written to report
+			// exactly that, and was unreachable whenever the deadline landed
+			// inside the request rather than between attempts, which is the
+			// common case on a slow link or a loaded machine.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, kerrors.Wrap(ctxErr, kerrors.CodeUnexpected,
+					"%s %s timed out or was cancelled while retrying (last status %d)",
+					req.method, req.path, lastStatus)
+			}
 			return zero, err
 		}
 		lastStatus = status
