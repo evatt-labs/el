@@ -58,7 +58,6 @@ func Instrument(tp trace.TracerProvider, mp metric.MeterProvider) func(Registrat
 				attribute.String("kraai.provider", reg.Provider),
 				attribute.String("kraai.resource_type", reg.Type),
 				attribute.String("kraai.capability", reg.Capability),
-				attribute.String("kraai.phase", reg.Phase.String()),
 			},
 		}
 	}

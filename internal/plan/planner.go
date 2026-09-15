@@ -75,6 +75,13 @@ type plannedItem struct {
 	ref  resource.Ref
 	spec resource.Spec
 	res  getter
+	// dependsOn carries the originating resource.Registration.DependsOn
+	// through expand, for graph.go's computeWaves to resolve into edges.
+	// Not part of Item: nothing downstream of this package (apply,
+	// destroy, the CLI) needs the raw dependency keys once Wave has
+	// already been computed from them — Item.Wave is the only thing that
+	// crosses the package boundary.
+	dependsOn []string
 }
 
 // Plan walks m's services and reports what would happen to every resource
@@ -104,21 +111,35 @@ func (p *Planner) Plan(ctx context.Context, m *manifest.Manifest, environmentNam
 		return nil, err
 	}
 
-	byPhase := make(map[resource.Phase][]plannedItem, len(resource.Phases()))
-	for _, it := range items {
-		byPhase[it.Phase] = append(byPhase[it.Phase], it)
+	waves, err := computeWaves(items, serviceDependsOn(m))
+	if err != nil {
+		return nil, err
+	}
+	waveCount := 0
+	for i := range items {
+		items[i].Wave = waves[i]
+		if waves[i]+1 > waveCount {
+			waveCount = waves[i] + 1
+		}
 	}
 
-	// Phases run in sequence (D31); every phase runs regardless of whether
-	// an earlier one had failures, so one unreachable resource never hides
-	// the answers for every other one (see the package doc).
+	byWave := make([][]plannedItem, waveCount)
+	for _, it := range items {
+		byWave[it.Wave] = append(byWave[it.Wave], it)
+	}
+
+	// Waves run in sequence; every wave runs regardless of whether an
+	// earlier one had failures, so one unreachable resource never hides
+	// the answers for every other one (see the package doc). This is the
+	// direct replacement for the old phase-in-sequence loop: a wave is
+	// exactly "everything with no unresolved dependency left," derived
+	// from the graph rather than declared as one of three fixed stages.
 	var actions []Action
-	for _, phase := range resource.Phases() {
-		group := byPhase[phase]
+	for _, group := range byWave {
 		if len(group) == 0 {
 			continue
 		}
-		actions = append(actions, p.getPhase(ctx, group)...)
+		actions = append(actions, p.getWave(ctx, group)...)
 	}
 
 	// A cancelled run is not a plan. Every Get honours ctx, so cancelling
@@ -131,6 +152,22 @@ func (p *Planner) Plan(ctx context.Context, m *manifest.Manifest, environmentNam
 		return nil, kerrors.Wrap(err, kerrors.CodeUnexpected, "planning was cancelled")
 	}
 	return &Plan{Actions: actions}, nil
+}
+
+// serviceDependsOn projects m.Services down to the one field computeWaves
+// needs: each service's own manifest.Service.DependsOn, keyed by service
+// name. A plain map rather than passing manifest.Service (or *Manifest)
+// itself into graph.go, so that package stays free of any manifest
+// vocabulary — the same reason Registration.Condition takes a small map
+// instead of a whole manifest (internal/resource/registry.go).
+func serviceDependsOn(m *manifest.Manifest) map[string][]string {
+	out := make(map[string][]string, len(m.Services))
+	for name, svc := range m.Services {
+		if len(svc.DependsOn) > 0 {
+			out[name] = svc.DependsOn
+		}
+	}
+	return out
 }
 
 // expand walks every service's declared bindings in a deterministic order
@@ -285,12 +322,13 @@ func (p *Planner) expandCompute(
 		out = append(out, plannedItem{
 			Item: Item{
 				ServiceKey: svcKey, Binding: svcKey, Capability: manifest.CapabilityCompute,
-				Provider: r.Provider, Type: r.Type, Phase: r.Phase,
+				Provider: r.Provider, Type: r.Type,
 				ReadsBindings: reads,
 			},
-			ref:  resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
-			spec: resource.Spec{Binding: svcKey, Name: name, Config: config},
-			res:  r.Resource,
+			ref:       resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
+			spec:      resource.Spec{Binding: svcKey, Name: name, Config: config},
+			res:       r.Resource,
+			dependsOn: r.DependsOn,
 		})
 	}
 	return out, nil
@@ -360,7 +398,7 @@ func (p *Planner) expandBinding(
 		out = append(out, plannedItem{
 			Item: Item{
 				ServiceKey: svcKey, Binding: binding, Capability: capability,
-				Provider: r.Provider, Type: r.Type, Phase: r.Phase,
+				Provider: r.Provider, Type: r.Type,
 				// A non-compute item reads only the binding it was itself
 				// expanded from — identical to Binding above, so this is a
 				// no-op change to what today's behaviour already was. Set
@@ -370,17 +408,18 @@ func (p *Planner) expandBinding(
 				// apply's to infer.
 				ReadsBindings: []string{binding},
 			},
-			ref:  resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
-			spec: resource.Spec{Binding: binding, Name: name, Config: config},
-			res:  r.Resource,
+			ref:       resource.Ref{Provider: r.Provider, Type: r.Type, Name: name},
+			spec:      resource.Spec{Binding: binding, Name: name, Config: config},
+			res:       r.Resource,
+			dependsOn: r.DependsOn,
 		})
 	}
 	return out, nil
 }
 
-// getPhase runs Get for every item in one phase, bounded by p.concurrency,
+// getWave runs Get for every item in one wave, bounded by p.concurrency,
 // and returns one Action per item in the same order items was given in.
-func (p *Planner) getPhase(ctx context.Context, items []plannedItem) []Action {
+func (p *Planner) getWave(ctx context.Context, items []plannedItem) []Action {
 	actions := make([]Action, len(items))
 
 	g := &errgroup.Group{}

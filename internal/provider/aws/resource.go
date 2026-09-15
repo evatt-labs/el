@@ -117,9 +117,9 @@ type resourceType struct {
 	// this schema; fetching it once per type rather than once per call
 	// avoids turning every write-path call into two API round trips.
 	//
-	// A mutex guarding a plain bool rather than sync.Once: a phase's
+	// A mutex guarding a plain bool rather than sync.Once: a wave's
 	// resources run concurrently under errgroup.SetLimit (D13), and more
-	// than one resource of the same type can be updated in the same phase,
+	// than one resource of the same type can be updated in the same wave,
 	// so this is genuinely reachable from multiple goroutines. sync.Once
 	// would also cache a transient failure (a single throttled
 	// DescribeType) forever for the rest of the run; caching only on

@@ -54,8 +54,22 @@ type Item struct {
 	// resource type this binding (partly) expanded to (D30).
 	Provider string
 	Type     string
-	// Phase is when this resource type is provisioned (D31).
-	Phase resource.Phase
+	// Wave is the zero-based execution wave this resource is provisioned
+	// in: the length of the longest chain of dependencies (type edges from
+	// resource.Registration.DependsOn, plus manifest-level
+	// service.DependsOn) that must complete before this one can start.
+	// Wave 0 depends on nothing. Computed once per Plan by topologically
+	// sorting the dependency graph internal/plan/graph.go builds from
+	// every planned item (Kahn's algorithm, layered) — replaces
+	// resource.Phase, which named one of three fixed, hardcoded stages
+	// instead of deriving an order from real dependencies. See
+	// resource.Registration.DependsOn's doc comment for why.
+	//
+	// Everything in the same wave runs concurrently; apply executes waves
+	// in ascending order, destroy in descending order — the direct
+	// replacement for what phase-in-sequence, phase-in-reverse already
+	// did, now derived rather than declared.
+	Wave int
 	// ReadsBindings names the bindings in this action's own service whose
 	// credentials it may read.
 	//

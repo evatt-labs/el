@@ -109,8 +109,11 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 	// The execution role's own real name is spec.Name — the same derived
 	// name every Tier 2 registration for this service shares (iamrole.go
 	// sets RoleName to exactly this) — so its ARN is constructed the same
-	// way eventsrule.go constructs the function's own, and for the
-	// identical reason: no live lookup, no same-phase ordering risk.
+	// way eventsrule.go constructs the function's own: no live lookup. The
+	// role is now a real DependsOn ahead of this function (register.go), so
+	// a live lookup would be safe too; constructing it locally still avoids
+	// a needless extra API call for a value this package can already
+	// derive.
 	execRoleARN := roleARN(account, spec.Name)
 
 	env, err := resolveEnv(ctx, spec, lambdaSettings)

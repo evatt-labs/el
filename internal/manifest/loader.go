@@ -195,11 +195,13 @@ func (l *Loader) loadEnvironment(envName string) (*Environment, error) {
 
 // validateServices checks every field DecodeStrict cannot: not an unknown
 // key (that is strict-decoding's job), but a known field whose value falls
-// outside its declared vocabulary. Today that is exactly Compute.Trigger.
+// outside its declared vocabulary — Compute.Trigger, and DependsOn's own
+// structural sanity (every named service exists, and a service does not
+// name itself).
 //
 // Iterates services in sorted key order so a manifest with more than one
-// bad trigger reports the same one first on every run, rather than
-// whichever Go's map iteration happened to visit first.
+// bad trigger or depends_on entry reports the same one first on every run,
+// rather than whichever Go's map iteration happened to visit first.
 func validateServices(services map[string]Service) error {
 	names := make([]string, 0, len(services))
 	for name := range services {
@@ -209,14 +211,22 @@ func validateServices(services map[string]Service) error {
 
 	for _, name := range names {
 		svc := services[name]
-		if svc.Compute == nil {
-			continue
+		if svc.Compute != nil {
+			switch svc.Compute.Trigger {
+			case TriggerHTTP, TriggerSchedule:
+			default:
+				return kerrors.Validation("services.%s.compute.trigger: must be %q or %q, got %q",
+					name, TriggerHTTP, TriggerSchedule, svc.Compute.Trigger)
+			}
 		}
-		switch svc.Compute.Trigger {
-		case TriggerHTTP, TriggerSchedule:
-		default:
-			return kerrors.Validation("services.%s.compute.trigger: must be %q or %q, got %q",
-				name, TriggerHTTP, TriggerSchedule, svc.Compute.Trigger)
+		for _, dep := range svc.DependsOn {
+			if dep == name {
+				return kerrors.Validation("services.%s.depends_on: a service cannot depend on itself", name)
+			}
+			if _, ok := services[dep]; !ok {
+				return kerrors.Validation(
+					"services.%s.depends_on: %q is not a declared service", name, dep)
+			}
 		}
 	}
 	return nil

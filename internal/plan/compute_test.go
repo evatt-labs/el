@@ -34,13 +34,13 @@ func newComputeRegistryFixture(t *testing.T) *computeRegistryFixture {
 	regs := []resource.Registration{
 		{
 			Provider: "fakecloud", Type: "function", Capability: manifest.CapabilityCompute,
-			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: f.function,
+			Lookup: resource.LookupByName, Resource: f.function,
 			// No Triggers: applies to every service using this compute
 			// vendor, whatever it declares (or doesn't declare).
 		},
 		{
 			Provider: "fakecloud", Type: "http_api", Capability: manifest.CapabilityCompute,
-			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: f.httpAPI,
+			Lookup: resource.LookupByName, Resource: f.httpAPI,
 			Triggers: []string{manifest.TriggerHTTP},
 		},
 	}
@@ -219,16 +219,16 @@ func newFrontDoorRegistryFixture(t *testing.T) *frontDoorRegistryFixture {
 	regs := []resource.Registration{
 		{
 			Provider: "fakecloud", Type: "function", Capability: manifest.CapabilityCompute,
-			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+			Lookup: resource.LookupByName, Resource: newFakeResource(),
 		},
 		{
 			Provider: "fakecloud", Type: "http_api", Capability: manifest.CapabilityCompute,
-			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+			Lookup: resource.LookupByName, Resource: newFakeResource(),
 			Triggers: []string{manifest.TriggerHTTP}, SelectedBy: frontDoorIs("apigateway"),
 		},
 		{
 			Provider: "fakecloud", Type: "function_url", Capability: manifest.CapabilityCompute,
-			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+			Lookup: resource.LookupByName, Resource: newFakeResource(),
 			Triggers: []string{manifest.TriggerHTTP}, SelectedBy: frontDoorIs("url"),
 		},
 	}

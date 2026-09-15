@@ -323,12 +323,12 @@ func writeApplyText(w io.Writer, envName string, result *apply.Result) error {
 	} else {
 		tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 
-		phase := result.Results[0].Phase
-		_, _ = fmt.Fprintf(tw, "%s:\n", phase)
+		wave := result.Results[0].Wave
+		_, _ = fmt.Fprintf(tw, "wave %d:\n", wave)
 		for _, r := range result.Results {
-			if r.Phase != phase {
-				phase = r.Phase
-				_, _ = fmt.Fprintf(tw, "\n%s:\n", phase)
+			if r.Wave != wave {
+				wave = r.Wave
+				_, _ = fmt.Fprintf(tw, "\nwave %d:\n", wave)
 			}
 			_, _ = fmt.Fprintf(tw, "  %s\t%-9s\t%s\t%s/%s\t%s.%s", outcomeSymbol(r.Outcome), r.Outcome,
 				strconv.Quote(r.Ref.Name), r.Provider, r.Type, r.ServiceKey, r.Binding)
@@ -348,8 +348,10 @@ func writeApplyText(w io.Writer, envName string, result *apply.Result) error {
 // deliberately separate, stable projection of *apply.Result, for the same
 // reasons internal/cli/plan.go's planDocument is not a direct
 // json.Marshal of *plan.Plan: ActionResult.Err is an error interface, and
-// Outcome/resource.Phase are integer enums whose numeric values are an
-// implementation detail. Every field here is a plain string, int, or bool.
+// Outcome is an integer enum whose numeric value is an implementation
+// detail. Every field here is a plain string, int, or bool. "phase" ->
+// "wave" for the same breaking-change reason planActionJSON's own doc
+// comment records — resource.Phase is gone, replaced by plan.Item.Wave.
 type applyDocument struct {
 	Environment string            `json:"environment"`
 	Summary     applySummaryJSON  `json:"summary"`
@@ -375,7 +377,7 @@ type applyResultJSON struct {
 	Capability string `json:"capability"`
 	Provider   string `json:"provider"`
 	Type       string `json:"type"`
-	Phase      string `json:"phase"`
+	Wave       int    `json:"wave"`
 	Name       string `json:"name"`
 	Outcome    string `json:"outcome"`
 	Error      string `json:"error,omitempty"`
@@ -406,7 +408,7 @@ func toApplyDocument(envName string, result *apply.Result) applyDocument {
 			Capability: r.Capability,
 			Provider:   r.Provider,
 			Type:       r.Type,
-			Phase:      r.Phase.String(),
+			Wave:       r.Wave,
 			Name:       r.Ref.Name,
 			Outcome:    r.Outcome.String(),
 		}

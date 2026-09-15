@@ -66,7 +66,7 @@ func (d *Destroyer) Destroy(ctx context.Context, p *plan.Plan) (*Result, error) 
 	}
 
 	results := make([]ActionResult, len(p.Actions))
-	byPhase := indexByPhase(p.Actions)
+	byWave := indexByWave(p.Actions)
 	// One locker per run, mirroring internal/apply.Apply — see
 	// resource.ScopeLocker's doc comment on why it is not a shared
 	// singleton, and internal/resource/registry.go's Registration.Scope
@@ -75,18 +75,18 @@ func (d *Destroyer) Destroy(ctx context.Context, p *plan.Plan) (*Result, error) 
 	// like two concurrent creates can.
 	locker := resource.NewScopeLocker()
 
-	// Teardown runs phases in reverse (see resource.Phase's own doc
-	// comment, and this package's doc). Every phase runs regardless of
+	// Teardown runs waves in reverse (see plan.Item.Wave's own doc
+	// comment, and this package's doc). Every wave runs regardless of
 	// whether an earlier one had failures — the central asymmetry with
-	// apply's Apply, which stops at the first failed phase. See the
+	// apply's Apply, which stops at the first failed wave. See the
 	// package doc's "Failure semantics are deliberately the OPPOSITE of
 	// apply's" section.
-	for _, phase := range reversedPhases() {
-		idxs := byPhase[phase]
+	for wave := len(byWave) - 1; wave >= 0; wave-- {
+		idxs := byWave[wave]
 		if len(idxs) == 0 {
 			continue
 		}
-		d.runPhase(ctx, p.Actions, idxs, results, locker)
+		d.runWave(ctx, p.Actions, idxs, results, locker)
 	}
 
 	// A cancelled run is not a completed destroy, for the same reason
@@ -104,44 +104,37 @@ func (d *Destroyer) Destroy(ctx context.Context, p *plan.Plan) (*Result, error) 
 	return &Result{Results: results}, nil
 }
 
-// reversedPhases returns resource.Phases() in reverse: PhaseCompute,
-// PhaseStorage, PhaseDatabase. A small local helper rather than a change
-// to resource.Phases() itself, since that function's forward order is
-// correct and used elsewhere (internal/plan, internal/apply) — reversing
-// is this package's own concern.
-func reversedPhases() []resource.Phase {
-	forward := resource.Phases()
-	out := make([]resource.Phase, len(forward))
-	for i, p := range forward {
-		out[len(forward)-1-i] = p
-	}
-	return out
-}
-
-// indexByPhase groups action indices by phase, preserving each action's
+// indexByWave groups action indices by wave, preserving each action's
 // original position in actions/results so per-action output stays aligned
-// regardless of how the input plan happened to be ordered. Mirrors
-// internal/apply/apply.go's function of the same name and purpose.
-func indexByPhase(actions []plan.Action) map[resource.Phase][]int {
-	out := make(map[resource.Phase][]int, len(resource.Phases()))
+// regardless of how the input plan happened to be ordered. Indexed
+// directly by wave number (0..max), mirroring internal/apply/apply.go's
+// function of the same name and purpose.
+func indexByWave(actions []plan.Action) [][]int {
+	maxWave := 0
+	for _, a := range actions {
+		if a.Wave > maxWave {
+			maxWave = a.Wave
+		}
+	}
+	out := make([][]int, maxWave+1)
 	for i, a := range actions {
-		out[a.Phase] = append(out[a.Phase], i)
+		out[a.Wave] = append(out[a.Wave], i)
 	}
 	return out
 }
 
-// runPhase executes every action at idxs concurrently, bounded by
+// runWave executes every action at idxs concurrently, bounded by
 // d.concurrency.
 //
-// Unlike internal/apply/apply.go's runPhase, this reports nothing back to
+// Unlike internal/apply/apply.go's runWave, this reports nothing back to
 // its caller about whether any action failed: Destroy never gates a later
-// phase on an earlier one's outcome, so there is nothing for a return
+// wave on an earlier one's outcome, so there is nothing for a return
 // value to communicate. Mirrors apply's central property all the same —
 // the errgroup.Group's function always returns nil regardless of the
 // action's outcome, so one action's failure is recorded in results and
 // never propagated through the group, which would otherwise cancel every
-// sibling action still in flight in the same phase.
-func (d *Destroyer) runPhase(
+// sibling action still in flight in the same wave.
+func (d *Destroyer) runWave(
 	ctx context.Context, actions []plan.Action, idxs []int, results []ActionResult,
 	locker *resource.ScopeLocker,
 ) {

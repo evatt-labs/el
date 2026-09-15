@@ -78,7 +78,7 @@ func (a *Applier) Apply(ctx context.Context, p *plan.Plan) (*Result, error) {
 	}
 
 	results := make([]ActionResult, len(p.Actions))
-	byPhase := indexByPhase(p.Actions)
+	byWave := indexByWave(p.Actions)
 
 	outputs := resource.NewOutputs()
 	secrets := newSecretIndex()
@@ -88,21 +88,24 @@ func (a *Applier) Apply(ctx context.Context, p *plan.Plan) (*Result, error) {
 	// singleton).
 	locker := resource.NewScopeLocker()
 
-	// Phases run in sequence (mirroring internal/plan/planner.go's own
-	// phase loop); once one has a failure, no later phase starts — see the
-	// package doc's "Execution order and failure semantics" section.
-	phaseFailed := false
-	for _, phase := range resource.Phases() {
-		idxs := byPhase[phase]
+	// Waves run in ascending order (mirroring internal/plan/planner.go's own
+	// wave loop); once one has a failure, no later wave starts — see the
+	// package doc's "Execution order and failure semantics" section. This
+	// replaces the old fixed three-phase loop: byWave's length is derived
+	// from the plan itself (internal/plan/graph.go's computeWaves), not a
+	// constant set of stages.
+	waveFailed := false
+	for wave := range byWave {
+		idxs := byWave[wave]
 		if len(idxs) == 0 {
 			continue
 		}
-		if phaseFailed {
-			skipPhase(p.Actions, idxs, results)
+		if waveFailed {
+			skipWave(p.Actions, idxs, results)
 			continue
 		}
-		if a.runPhase(ctx, p.Actions, idxs, results, outputs, secrets, locker) {
-			phaseFailed = true
+		if a.runWave(ctx, p.Actions, idxs, results, outputs, secrets, locker) {
+			waveFailed = true
 		}
 	}
 
@@ -123,37 +126,46 @@ func (a *Applier) Apply(ctx context.Context, p *plan.Plan) (*Result, error) {
 	return &Result{Results: results}, nil
 }
 
-// indexByPhase groups action indices by phase, preserving each action's
+// indexByWave groups action indices by wave, preserving each action's
 // original position in actions/results so per-action output stays aligned
-// regardless of how the input plan happened to be ordered.
-func indexByPhase(actions []plan.Action) map[resource.Phase][]int {
-	out := make(map[resource.Phase][]int, len(resource.Phases()))
+// regardless of how the input plan happened to be ordered. The returned
+// slice is indexed directly by wave number (0..max), unlike the old
+// phase-keyed map, since a wave count is derived per plan rather than
+// fixed.
+func indexByWave(actions []plan.Action) [][]int {
+	maxWave := 0
+	for _, a := range actions {
+		if a.Wave > maxWave {
+			maxWave = a.Wave
+		}
+	}
+	out := make([][]int, maxWave+1)
 	for i, a := range actions {
-		out[a.Phase] = append(out[a.Phase], i)
+		out[a.Wave] = append(out[a.Wave], i)
 	}
 	return out
 }
 
-// skipPhase marks every action at idxs as OutcomeSkipped: an earlier phase
+// skipWave marks every action at idxs as OutcomeSkipped: an earlier wave
 // failed, so nothing in this one is attempted.
-func skipPhase(actions []plan.Action, idxs []int, results []ActionResult) {
+func skipWave(actions []plan.Action, idxs []int, results []ActionResult) {
 	for _, i := range idxs {
 		results[i] = ActionResult{Item: actions[i].Item, Ref: actions[i].Ref, Outcome: OutcomeSkipped}
 	}
 }
 
-// runPhase executes every action at idxs concurrently, bounded by
+// runWave executes every action at idxs concurrently, bounded by
 // a.concurrency, and reports whether any of them failed.
 //
-// Mirrors internal/plan/planner.go's getPhase almost exactly, including its
+// Mirrors internal/plan/planner.go's getWave almost exactly, including its
 // central property: the errgroup.Group's function always returns nil
 // regardless of the action's outcome. A failure is recorded in results and
 // in this call's own return value, never propagated through the group —
 // propagating it would cancel the group's context and abort every sibling
-// action still in flight in the same phase, which is exactly the "let one
-// failure take out unrelated resources" behaviour phase-level (not
+// action still in flight in the same wave, which is exactly the "let one
+// failure take out unrelated resources" behaviour wave-level (not
 // action-level) failure handling exists to avoid.
-func (a *Applier) runPhase(
+func (a *Applier) runWave(
 	ctx context.Context, actions []plan.Action, idxs []int, results []ActionResult,
 	outputs *resource.Outputs, secrets *secretIndex, locker *resource.ScopeLocker,
 ) bool {

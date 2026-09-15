@@ -967,17 +967,18 @@ func (c *Client) OwnsBucket(ctx context.Context, bucket string) (bool, error) {
 // A Lambda's execution Role property and an EventBridge Rule's Target Arn
 // both require a full ARN, not a bare name — unlike AWS::Lambda::Url's
 // TargetFunctionArn, which documents bare-name acceptance. The role and the
-// function it assumes into are ordered by phase (PhaseStorage before
-// PhaseCompute, see register.go), so a live GetResource lookup of the
-// role's Arn attribute would be safe. The function and its own triggers
-// (EventBridge Rule, Lambda Url) are not: both are registered in
-// PhaseCompute, which runs concurrently and gives no guarantee the function
-// exists yet when its rule's Create runs (the same class of same-phase
-// ordering gap register.go's own doc comment already flags for
-// RecordSet/CloudFront/Certificate). Constructing every ARN this package
+// function it assumes into are now a real DependsOn edge (register.go:
+// TypeLambdaFunction depends on TypeIAMRole), so a live GetResource lookup
+// of the role's Arn attribute would be safe today. The function and
+// EventBridge Rule are not ordered against each other at all — Rule
+// declares no DependsOn on the function (see eventsrule.go's own doc
+// comment) because PutTargets never validates the target's existence, so a
+// live lookup here would still race. Constructing every ARN this package
 // needs locally, from the account id plus the region plus the resource's
 // own derived name, removes the dependency entirely rather than papering
-// over a race with a retry.
+// over a race with a retry — and does so uniformly, rather than requiring
+// every call site to know which of its cross-resource references the
+// dependency graph has already made safe and which it has not.
 //
 // Assumes the "aws" partition. kraai's stated first deployment target is
 // commercial AWS for kraai.dev's own infrastructure (D24); GovCloud/China

@@ -150,6 +150,32 @@ type Service struct {
 	KeyValue  []KeyValue    `yaml:"keyvalue,omitempty"`
 	Objects   []ObjectStore `yaml:"objects,omitempty"`
 	Queues    []Queue       `yaml:"queues,omitempty"`
+
+	// DependsOn names other services in this manifest that must be fully
+	// provisioned before this one. The escape hatch for ordering that is
+	// real but that no resource.Registration can see: a registration's own
+	// DependsOn (internal/resource/registry.go) expresses what one
+	// resource type needs from another because the code creating it knows
+	// — its own function needs its own role, say. Nothing in a
+	// registration can know that one service's code calls another
+	// service's API at cold start, or that a seed job in one service must
+	// finish before another service starts accepting traffic; that
+	// relationship exists only in the manifest author's head; DependsOn is
+	// where it goes once it needs to be real.
+	//
+	// internal/plan resolves this into an edge from every resource type
+	// the named service expands to, to every resource type this service
+	// expands to — the same "one service's resources all wait for
+	// another's" grain the phase model gave every resource for free before
+	// this workstream narrowed ordering to real, instance-level edges.
+	// Validated against the service map at load (validateServices): every
+	// name must be another service in this manifest, and a service must
+	// not name itself. A cycle spanning more than one service is not
+	// caught here — internal/plan's graph is authoritative for cycle
+	// detection across the whole ordering, type edges and depends_on
+	// edges alike, so it is caught once, in one place, rather than
+	// partially here and partially there.
+	DependsOn []string `yaml:"depends_on,omitempty"`
 }
 
 // Compute is a service's own compute shape: how it is invoked, and its own
