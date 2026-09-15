@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -19,6 +20,23 @@ type fakeClient struct {
 	listErr      error
 	getCalls     []string
 	listCalls    int
+
+	createID    string
+	createProps map[string]any
+	createErr   error
+	createCalls []map[string]any
+
+	updateProps   map[string]any
+	updateErr     error
+	updateCalls   []string
+	updatePatches [][]byte
+
+	deleteErr   error
+	deleteCalls []string
+
+	schema      Schema
+	schemaErr   error
+	schemaCalls int
 }
 
 func (f *fakeClient) GetResource(_ context.Context, _ string, identifier string) (map[string]any, bool, error) {
@@ -39,6 +57,36 @@ func (f *fakeClient) ListResources(context.Context, string) ([]string, error) {
 		return nil, f.listErr
 	}
 	return f.list, nil
+}
+
+func (f *fakeClient) CreateResource(_ context.Context, _ string, desiredState map[string]any) (string, map[string]any, error) {
+	f.createCalls = append(f.createCalls, desiredState)
+	if f.createErr != nil {
+		return "", nil, f.createErr
+	}
+	return f.createID, f.createProps, nil
+}
+
+func (f *fakeClient) UpdateResource(_ context.Context, _ string, identifier string, patch []byte) (map[string]any, error) {
+	f.updateCalls = append(f.updateCalls, identifier)
+	f.updatePatches = append(f.updatePatches, patch)
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return f.updateProps, nil
+}
+
+func (f *fakeClient) DeleteResource(_ context.Context, _ string, identifier string) error {
+	f.deleteCalls = append(f.deleteCalls, identifier)
+	return f.deleteErr
+}
+
+func (f *fakeClient) DescribeType(context.Context, string) (Schema, error) {
+	f.schemaCalls++
+	if f.schemaErr != nil {
+		return Schema{}, f.schemaErr
+	}
+	return f.schema, nil
 }
 
 func matchNameField(properties map[string]any, name string) bool {
@@ -171,32 +219,366 @@ func TestResourceTypeGetByAttr(t *testing.T) {
 	})
 }
 
-func TestResourceTypeMutationsAreNotImplemented(t *testing.T) {
-	r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: &fakeClient{}}
+func TestResourceTypeCreate(t *testing.T) {
+	t.Run("submits Config as desired state and returns the created identity", func(t *testing.T) {
+		fc := &fakeClient{createID: "my-bucket", createProps: map[string]any{"BucketName": "my-bucket"}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
 
-	assertNotImplemented := func(t *testing.T, err error) {
-		t.Helper()
-		if err == nil {
-			t.Fatal("expected ErrNotImplemented")
+		state, err := r.Create(context.Background(), resource.Spec{Binding: "objects", Name: "my-bucket", Config: map[string]any{"BucketName": "my-bucket"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
 		}
-		if !errors.Is(err, ErrNotImplemented) {
-			t.Fatalf("err = %v, want it to wrap ErrNotImplemented", err)
+		if state.ID != "my-bucket" || state.Attributes["BucketName"] != "my-bucket" || state.Ref.Name != "my-bucket" {
+			t.Fatalf("state = %+v", state)
 		}
+		if len(fc.createCalls) != 1 || fc.createCalls[0]["BucketName"] != "my-bucket" {
+			t.Fatalf("createCalls = %+v", fc.createCalls)
+		}
+	})
+
+	t.Run("no derived name is a validation error", func(t *testing.T) {
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: &fakeClient{}}
+
+		_, err := r.Create(context.Background(), resource.Spec{Binding: "objects"})
 		var kerr *kerrors.KError
-		if !errors.As(err, &kerr) {
-			t.Fatalf("err = %v, want a *kerrors.KError", err)
+		if !errors.As(err, &kerr) || kerr.Code() != kerrors.CodeValidation {
+			t.Fatalf("err = %v, want a CodeValidation KError", err)
 		}
-	}
+	})
 
-	t.Run("Create", func(t *testing.T) {
-		_, err := r.Create(context.Background(), resource.Spec{})
-		assertNotImplemented(t, err)
+	t.Run("a byTag type stamps its identity tag into the create call itself", func(t *testing.T) {
+		// D26's non-negotiable rule: the tag must ride in CreateResource's
+		// own desired state, never a follow-up write, since a crash between
+		// the two would orphan the resource unfindably.
+		fc := &fakeClient{createID: "arn:aws:acm:...", createProps: map[string]any{}}
+		r := &resourceType{
+			provider: Provider, typeName: TypeCertificateManagerCertificate, lookup: resource.LookupByTag,
+			client: fc, match: certificateMatch, stampTag: certificateStampTag,
+		}
+
+		_, err := r.Create(context.Background(), resource.Spec{
+			Binding: "objects", Name: "my-cert",
+			Config: map[string]any{"DomainName": "example.com"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if len(fc.createCalls) != 1 {
+			t.Fatalf("createCalls = %+v", fc.createCalls)
+		}
+		tags, _ := fc.createCalls[0]["Tags"].([]any)
+		if len(tags) != 1 {
+			t.Fatalf("Tags = %+v, want exactly one entry", tags)
+		}
+		tag, _ := tags[0].(map[string]any)
+		if tag["Key"] != identityTagKey || tag["Value"] != "my-cert" {
+			t.Fatalf("tag = %+v", tag)
+		}
 	})
-	t.Run("Update", func(t *testing.T) {
-		_, err := r.Update(context.Background(), resource.Ref{}, resource.Spec{})
-		assertNotImplemented(t, err)
+
+	t.Run("a byTag type with no stampTag function fails loudly rather than orphaning silently", func(t *testing.T) {
+		r := &resourceType{provider: Provider, typeName: TypeCertificateManagerCertificate, lookup: resource.LookupByTag, client: &fakeClient{}}
+
+		_, err := r.Create(context.Background(), resource.Spec{Binding: "objects", Name: "my-cert"})
+		var kerr *kerrors.KError
+		if !errors.As(err, &kerr) || kerr.Code() != kerrors.CodeValidation {
+			t.Fatalf("err = %v, want a CodeValidation KError", err)
+		}
 	})
-	t.Run("Delete", func(t *testing.T) {
-		assertNotImplemented(t, r.Delete(context.Background(), resource.Ref{}))
+
+	t.Run("a CreateResource failure is reported, not swallowed", func(t *testing.T) {
+		fc := &fakeClient{createErr: errors.New("throttled")}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if _, err := r.Create(context.Background(), resource.Spec{Binding: "objects", Name: "x"}); err == nil {
+			t.Fatal("expected the failure to be reported")
+		}
+	})
+}
+
+func TestResourceTypeUpdate(t *testing.T) {
+	t.Run("diffs current against desired and submits a patch", func(t *testing.T) {
+		fc := &fakeClient{
+			schema:       Schema{Handlers: map[string]json.RawMessage{"create": nil, "update": nil}},
+			byIdentifier: map[string]map[string]any{"my-bucket": {"BucketName": "my-bucket", "VersioningConfiguration": map[string]any{"Status": "Suspended"}}},
+			updateProps:  map[string]any{"BucketName": "my-bucket", "VersioningConfiguration": map[string]any{"Status": "Enabled"}},
+		}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		state, err := r.Update(context.Background(), resource.Ref{Name: "my-bucket"}, resource.Spec{
+			Binding: "objects", Name: "my-bucket",
+			Config: map[string]any{"BucketName": "my-bucket", "VersioningConfiguration": map[string]any{"Status": "Enabled"}},
+		})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if state.Attributes["VersioningConfiguration"].(map[string]any)["Status"] != "Enabled" {
+			t.Fatalf("state = %+v", state)
+		}
+		if len(fc.updateCalls) != 1 || fc.updateCalls[0] != "my-bucket" {
+			t.Fatalf("updateCalls = %v", fc.updateCalls)
+		}
+		var ops []patchOp
+		if err := json.Unmarshal(fc.updatePatches[0], &ops); err != nil {
+			t.Fatalf("decoding submitted patch: %v", err)
+		}
+		if len(ops) != 1 || ops[0].Op != "replace" || ops[0].Path != "/VersioningConfiguration" {
+			t.Fatalf("ops = %+v", ops)
+		}
+	})
+
+	t.Run("no schema update handler refuses with ErrImmutable rather than attempting the call", func(t *testing.T) {
+		fc := &fakeClient{
+			schema:       Schema{Handlers: map[string]json.RawMessage{"create": nil, "read": nil, "delete": nil}},
+			byIdentifier: map[string]map[string]any{"my-cert": {"DomainName": "example.com"}},
+		}
+		r := &resourceType{provider: Provider, typeName: TypeCertificateManagerCertificate, lookup: resource.LookupByName, client: fc}
+
+		_, err := r.Update(context.Background(), resource.Ref{Name: "my-cert"}, resource.Spec{Config: map[string]any{"DomainName": "other.example.com"}})
+		if !errors.Is(err, resource.ErrImmutable) {
+			t.Fatalf("err = %v, want it to wrap resource.ErrImmutable", err)
+		}
+		if len(fc.updateCalls) != 0 {
+			t.Fatal("expected no UpdateResource call to have been attempted")
+		}
+	})
+
+	t.Run("no differing properties is a no-op that still returns fresh state", func(t *testing.T) {
+		fc := &fakeClient{
+			schema:       Schema{Handlers: map[string]json.RawMessage{"update": nil}},
+			byIdentifier: map[string]map[string]any{"my-bucket": {"BucketName": "my-bucket"}},
+		}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		state, err := r.Update(context.Background(), resource.Ref{Name: "my-bucket"}, resource.Spec{Config: map[string]any{"BucketName": "my-bucket"}})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if state.ID != "my-bucket" {
+			t.Fatalf("state = %+v", state)
+		}
+		if len(fc.updateCalls) != 0 {
+			t.Fatal("expected no UpdateResource call when nothing differs")
+		}
+	})
+
+	t.Run("updating a resource that does not exist is a validation error", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{Handlers: map[string]json.RawMessage{"update": nil}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		_, err := r.Update(context.Background(), resource.Ref{Name: "missing"}, resource.Spec{Config: map[string]any{}})
+		var kerr *kerrors.KError
+		if !errors.As(err, &kerr) || kerr.Code() != kerrors.CodeValidation {
+			t.Fatalf("err = %v, want a CodeValidation KError", err)
+		}
+	})
+
+	t.Run("a DescribeType failure is reported, not swallowed", func(t *testing.T) {
+		fc := &fakeClient{schemaErr: errors.New("throttled")}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if _, err := r.Update(context.Background(), resource.Ref{Name: "x"}, resource.Spec{}); err == nil {
+			t.Fatal("expected the schema-fetch failure to be reported")
+		}
+	})
+
+	t.Run("byAttr resolves the candidate before fetching properties for the diff", func(t *testing.T) {
+		fc := &fakeClient{
+			schema: Schema{Handlers: map[string]json.RawMessage{"update": nil}},
+			list:   []string{"cand-1"},
+			byIdentifier: map[string]map[string]any{
+				"cand-1": {"Name": "target", "Comment": "old"},
+			},
+			updateProps: map[string]any{"Name": "target", "Comment": "new"},
+		}
+		r := &resourceType{provider: Provider, typeName: TypeCloudFrontDistribution, lookup: resource.LookupByAttr, client: fc, match: matchNameField}
+
+		state, err := r.Update(context.Background(), resource.Ref{Name: "target"}, resource.Spec{Config: map[string]any{"Name": "target", "Comment": "new"}})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if state.ID != "cand-1" {
+			t.Fatalf("state = %+v", state)
+		}
+	})
+}
+
+func TestResourceTypeDelete(t *testing.T) {
+	t.Run("resolves then deletes", func(t *testing.T) {
+		fc := &fakeClient{byIdentifier: map[string]map[string]any{"my-bucket": {}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if err := r.Delete(context.Background(), resource.Ref{Name: "my-bucket"}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if len(fc.deleteCalls) != 1 || fc.deleteCalls[0] != "my-bucket" {
+			t.Fatalf("deleteCalls = %v", fc.deleteCalls)
+		}
+	})
+
+	t.Run("byName: nothing to resolve against is success without calling DeleteResource", func(t *testing.T) {
+		// LookupByName has no existence check of its own (resolve returns
+		// found=true unconditionally for a derived identifier) — this
+		// documents that Delete relies on the client's own absence-is-success
+		// contract in that case, exercised by the byAttr case below instead.
+		fc := &fakeClient{}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if err := r.Delete(context.Background(), resource.Ref{Name: "never-existed"}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if len(fc.deleteCalls) != 1 {
+			t.Fatalf("deleteCalls = %v, want the byName fast path to still call DeleteResource", fc.deleteCalls)
+		}
+	})
+
+	t.Run("byAttr: no candidate found is success without calling DeleteResource", func(t *testing.T) {
+		fc := &fakeClient{list: []string{}}
+		r := &resourceType{provider: Provider, typeName: TypeCloudFrontDistribution, lookup: resource.LookupByAttr, client: fc, match: matchNameField}
+
+		if err := r.Delete(context.Background(), resource.Ref{Name: "never-existed"}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if len(fc.deleteCalls) != 0 {
+			t.Fatalf("deleteCalls = %v, want no DeleteResource call for a never-created resource", fc.deleteCalls)
+		}
+	})
+
+	t.Run("a resolve failure is reported, not treated as absence", func(t *testing.T) {
+		fc := &fakeClient{listErr: errors.New("throttled")}
+		r := &resourceType{provider: Provider, typeName: TypeCloudFrontDistribution, lookup: resource.LookupByAttr, client: fc, match: matchNameField}
+
+		if err := r.Delete(context.Background(), resource.Ref{Name: "x"}); err == nil {
+			t.Fatal("expected the resolve failure to be reported")
+		}
+	})
+
+	t.Run("a DeleteResource failure is reported, not swallowed", func(t *testing.T) {
+		fc := &fakeClient{byIdentifier: map[string]map[string]any{"my-bucket": {}}, deleteErr: errors.New("access denied")}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if err := r.Delete(context.Background(), resource.Ref{Name: "my-bucket"}); err == nil {
+			t.Fatal("expected the failure to be reported")
+		}
+	})
+}
+
+func TestResourceTypeDiffersFromState(t *testing.T) {
+	t.Run("a createOnlyProperty that differs is a replacement", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/BucketName"}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		differs, err := r.DiffersFromState(
+			resource.Spec{Config: map[string]any{"BucketName": "new-name"}},
+			&resource.State{Attributes: map[string]any{"BucketName": "old-name"}},
+		)
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if !differs {
+			t.Fatal("expected a createOnlyProperty change to be reported as differing")
+		}
+	})
+
+	t.Run("a nested createOnlyProperty is compared at its own path", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/DistributionConfig/CallerReference"}}}
+		r := &resourceType{provider: Provider, typeName: TypeCloudFrontDistribution, lookup: resource.LookupByAttr, client: fc}
+
+		differs, err := r.DiffersFromState(
+			resource.Spec{Config: map[string]any{"DistributionConfig": map[string]any{"CallerReference": "b", "Comment": "whatever"}}},
+			&resource.State{Attributes: map[string]any{"DistributionConfig": map[string]any{"CallerReference": "a", "Comment": "different but not create-only"}}},
+		)
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if !differs {
+			t.Fatal("expected the nested createOnlyProperty change to be reported as differing")
+		}
+	})
+
+	t.Run("a matching createOnlyProperty is not a replacement", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/BucketName"}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		differs, err := r.DiffersFromState(
+			resource.Spec{Config: map[string]any{"BucketName": "same-name"}},
+			&resource.State{Attributes: map[string]any{"BucketName": "same-name"}},
+		)
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if differs {
+			t.Fatal("expected an identical createOnlyProperty to report no difference")
+		}
+	})
+
+	t.Run("a createOnlyProperty not declared in the manifest is never a source of difference", func(t *testing.T) {
+		// D6: a property the manifest never mentions is never touched, so
+		// its absence from Spec.Config must not itself trigger a replacement.
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/BucketName"}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		differs, err := r.DiffersFromState(
+			resource.Spec{Config: map[string]any{}},
+			&resource.State{Attributes: map[string]any{"BucketName": "whatever"}},
+		)
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if differs {
+			t.Fatal("expected no difference when the manifest never declares the property at all")
+		}
+	})
+
+	t.Run("declared in the manifest but absent from current state is a replacement, not a silent match", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/BucketName"}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		differs, err := r.DiffersFromState(
+			resource.Spec{Config: map[string]any{"BucketName": "new-name"}},
+			&resource.State{Attributes: map[string]any{}},
+		)
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if !differs {
+			t.Fatal("expected a manifest-declared property Cloud Control never reported to be treated as differing")
+		}
+	})
+
+	t.Run("no createOnlyProperties at all means never a replacement", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		differs, err := r.DiffersFromState(resource.Spec{Config: map[string]any{"Anything": "goes"}}, &resource.State{Attributes: map[string]any{}})
+		if err != nil {
+			t.Fatalf("DiffersFromState: %v", err)
+		}
+		if differs {
+			t.Fatal("expected no createOnlyProperties to mean no replacement")
+		}
+	})
+
+	t.Run("the schema is fetched once and cached across calls", func(t *testing.T) {
+		fc := &fakeClient{schema: Schema{CreateOnlyProperties: []string{"/properties/BucketName"}}}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		for range 3 {
+			if _, err := r.DiffersFromState(resource.Spec{Config: map[string]any{}}, &resource.State{}); err != nil {
+				t.Fatalf("DiffersFromState: %v", err)
+			}
+		}
+		if fc.schemaCalls != 1 {
+			t.Fatalf("schemaCalls = %d, want exactly 1 (cached)", fc.schemaCalls)
+		}
+	})
+
+	t.Run("a DescribeType failure is reported, not swallowed", func(t *testing.T) {
+		fc := &fakeClient{schemaErr: errors.New("throttled")}
+		r := &resourceType{provider: Provider, typeName: TypeS3Bucket, lookup: resource.LookupByName, client: fc}
+
+		if _, err := r.DiffersFromState(resource.Spec{}, &resource.State{}); err == nil {
+			t.Fatal("expected the schema-fetch failure to be reported")
+		}
 	})
 }
