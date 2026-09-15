@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -13,9 +12,7 @@ import (
 // rather than a fixed "latest.zip"-style key so two applies of identical
 // source produce the identical key — the same object, no upload, no Code
 // diff — while any real code change produces a new key and, downstream, a
-// visible Lambda code update. Shared between lambda.go (uploads to it) and
-// ssmparameter.go (publishes it), so both stay in lockstep by construction
-// rather than by convention.
+// visible Lambda code update.
 func artifactObjectKey(serviceName, sha256Hex string) string {
 	return serviceName + "/" + sha256Hex + ".zip"
 }
@@ -106,7 +103,7 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 	// sets RoleName to exactly this) — so its ARN is constructed the same
 	// way eventsrule.go constructs the function's own, and for the
 	// identical reason: no live lookup, no same-phase ordering risk.
-	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", account, spec.Name)
+	execRoleARN := roleARN(account, spec.Name)
 
 	env, err := resolveEnv(ctx, spec, lambdaSettings)
 	if err != nil {
@@ -126,7 +123,7 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 		"Architectures": []any{lambdaSettings.Architecture},
 		"MemorySize":    lambdaSettings.MemorySize,
 		"Timeout":       lambdaSettings.Timeout,
-		"Role":          roleARN,
+		"Role":          execRoleARN,
 		"Layers":        []any{lambdaSettings.LayerArn},
 		"Environment": map[string]any{
 			"Variables": env,
@@ -187,7 +184,20 @@ func (l *lambdaFunctionResource) Delete(ctx context.Context, ref resource.Ref) e
 // it 'Update requires: Replacement'"). See this type's own doc comment for
 // why the real translate — packaging, upload, secret resolution — never
 // runs here.
+//
+// It does still decode and validate the merged settings first, even though
+// the diff itself never uses them: decodeLambdaSettings is pure (no I/O),
+// and it is the one thing every compute service reaches unconditionally —
+// this is where an invalid httpFrontDoor setting surfaces as a `kraai plan`
+// failure instead of both HTTP front-door registrations silently selecting
+// neither (see compute_settings.go's own comment on httpFrontDoorIs for why
+// SelectedBy itself cannot report that error).
 func (l *lambdaFunctionResource) DiffersFromState(spec resource.Spec, state *resource.State) (bool, error) {
+	settingsMap, _ := spec.Config["settings"].(map[string]any)
+	if _, err := decodeLambdaSettings(settingsMap); err != nil {
+		return false, err
+	}
+
 	nameOnly := spec
 	nameOnly.Config = map[string]any{"FunctionName": spec.Name}
 	return l.inner.DiffersFromState(nameOnly, state)

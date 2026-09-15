@@ -60,24 +60,34 @@ func artifactBucketName(serviceName string) string {
 // # Per-service, not per-environment — a deviation from the brief, flagged here
 //
 // The brief calls for one artifact bucket shared by every service in an
-// environment. That shape is not reachable from this workstream alone:
-// internal/plan's expandCompute (out of scope for this workstream, D36)
-// expands every CapabilityCompute registration once per service, deriving
-// each Ref from that service's own name — there is no environment-only
-// expansion point this package's registration can hook into, and inventing
-// one means either a planner change (explicitly out of scope, and the
-// credential-contract workstream is already mid-flight against the same
-// files) or reaching outside Spec.Config for a value the planner never
-// puts there. What this registration actually produces is one bucket per
-// service instead of one per environment: still created in PhaseStorage
-// ahead of the function that reads it, still destroyed whenever that
-// service's own resources are torn down, but multiplied by service count
-// rather than shared. Functionally this satisfies "exists before the
-// Lambda, destroyed with the environment" for every service that has one;
-// it does not satisfy "one bucket, shared." A future workstream adding a
-// genuine environment-scoped expansion phase to internal/plan is the real
-// fix; noted in this workstream's PR description rather than worked around
-// here.
+// environment. Structurally, that shape is not reachable from this
+// workstream alone: internal/plan's expandCompute (out of scope for this
+// workstream, D36) expands every CapabilityCompute registration once per
+// service, deriving each Ref from that service's own name, with no
+// environment-only expansion point this package's registration can hook
+// into. But even setting that aside, a genuinely shared bucket is actively
+// wrong under this design's own concurrency model, not merely
+// unreachable: `kraai plan` calls Get for every planned item in a phase
+// concurrently (D13), before anything is created. If every service's
+// artifact-bucket item resolved to the identical AWS-side bucket name, a
+// fresh environment's first `kraai plan` would have every service's Get
+// independently observe "does not exist yet" and plan ActionCreate — none
+// of them would see a sibling's not-yet-applied plan. `kraai apply` then
+// runs every ActionCreate in the phase concurrently too, which means N
+// services racing N concurrent CreateResource calls at the same bucket
+// name, a create pattern this contract's Resource.Create was never built
+// to tolerate (it is called once per Ref, not N times concurrently for
+// equivalent Refs). One bucket per service sidesteps this entirely: each
+// service's Ref is genuinely distinct, so there is only ever one creator
+// per bucket. Still created in PhaseStorage ahead of the function that
+// reads it, still destroyed whenever that service's own resources are
+// torn down, but multiplied by service count rather than shared. A future
+// workstream wanting a genuinely shared bucket needs a real
+// environment-scoped expansion phase in internal/plan plus a way to
+// serialize (or dedupe) concurrent creators of the same resource — neither
+// exists today, and inventing either here is out of this workstream's
+// scope; noted in this workstream's PR description rather than worked
+// around silently.
 type artifactBucketResource struct {
 	inner *resourceType
 }

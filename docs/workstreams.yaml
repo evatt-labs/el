@@ -476,10 +476,15 @@ workstreams:
       - >-
         Register Tier 2 resource types on the generic engine built in
         `aws-provider-core`: `AWS::Lambda::Function`, `AWS::Lambda::Url`,
-        `AWS::IAM::Role`, `AWS::SSM::Parameter`, `AWS::Events::Rule`
-        (chosen over EventBridge Scheduler — see the PR description). No
-        new engine work — per-type registration plus schema-derived
-        validation only.
+        `AWS::IAM::Role`, `AWS::Events::Rule` (chosen over EventBridge
+        Scheduler — see the PR description), and `AWS::Lambda::Permission`
+        (added during review: without it, neither the schedule rule nor
+        the API Gateway can actually invoke the function). No new engine
+        work — per-type registration plus schema-derived validation only.
+        `AWS::SSM::Parameter`, originally in this list, was dropped during
+        review: it had no concrete consumer and existed only to publish a
+        value nothing read (Rule 2 — simplicity first, nothing
+        speculative).
       - >-
         Lambda artifact packaging: zip plus the Lambda Web Adapter layer
         (runs an unmodified ASGI app, so a later move to Fargate is a
@@ -487,6 +492,13 @@ workstreams:
         cost, faster cold start. A per-service S3 artifact bucket
         (PhaseStorage, ahead of the function) holds the built zips;
         determinism is enforced and tested directly.
+      - >-
+        A service's HTTP front door (API Gateway or a Lambda function URL)
+        is selected by a manifest-driven compute setting
+        (`httpFrontDoor`), validated against an explicit allow-list — a
+        service gets exactly one, never both (added during review, fixing
+        the same wrong-output bug class `per-service-compute` (#78)
+        eliminated for trigger gating).
     blocked_on: >-
       Resolved: compute targets AWS Lambda (this workstream), so kraai.dev
       does have a hosted-API shape as of this PR. Whether kraai.dev ships

@@ -30,9 +30,10 @@ func TestRegisterWiresEveryType(t *testing.T) {
 		{Provider + "/" + TypeAPIGatewayV2API, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByTag},
 		{Provider + "/" + TypeArtifactBucket, manifest.CapabilityCompute, resource.PhaseStorage, resource.LookupByName},
 		{Provider + "/" + TypeIAMRole, manifest.CapabilityCompute, resource.PhaseStorage, resource.LookupByName},
-		{Provider + "/" + TypeSSMParameter, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
 		{Provider + "/" + TypeLambdaURL, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByAttr},
 		{Provider + "/" + TypeEventsRule, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByName},
+		{Provider + "/" + TypePermissionEventsRule, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByAttr},
+		{Provider + "/" + TypePermissionAPIGateway, manifest.CapabilityCompute, resource.PhaseCompute, resource.LookupByAttr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
@@ -61,7 +62,7 @@ func TestComputeRegistrationsTriggerGating(t *testing.T) {
 		byType[r.Type] = r
 	}
 	function, httpAPI := byType[TypeLambdaFunction], byType[TypeAPIGatewayV2API]
-	bucket, role, param := byType[TypeArtifactBucket], byType[TypeIAMRole], byType[TypeSSMParameter]
+	bucket, role := byType[TypeArtifactBucket], byType[TypeIAMRole]
 	url, rule := byType[TypeLambdaURL], byType[TypeEventsRule]
 
 	if function.Triggers != nil {
@@ -81,11 +82,10 @@ func TestComputeRegistrationsTriggerGating(t *testing.T) {
 		t.Error("TypeAPIGatewayV2API must still apply to a service declaring no compute: block, unchanged from before Triggers existed")
 	}
 
-	// The artifact bucket, execution role and artifact-key parameter apply
-	// to every compute service unconditionally — every Lambda needs a
-	// package, a role and (this package's own choice) a discoverable
-	// artifact-key parameter regardless of how it's invoked.
-	for name, reg := range map[string]resource.Registration{"bucket": bucket, "role": role, "param": param} {
+	// The artifact bucket and execution role apply to every compute
+	// service unconditionally — every Lambda needs a package and a role
+	// regardless of how it's invoked.
+	for name, reg := range map[string]resource.Registration{"bucket": bucket, "role": role} {
 		if reg.Triggers != nil {
 			t.Errorf("%s.Triggers = %v, want nil", name, reg.Triggers)
 		}
@@ -106,6 +106,66 @@ func TestComputeRegistrationsTriggerGating(t *testing.T) {
 	}
 	if rule.AppliesToTrigger(manifest.TriggerHTTP) {
 		t.Error("TypeEventsRule must not apply to an HTTP-triggered service")
+	}
+
+	rulePermission, apiPermission := byType[TypePermissionEventsRule], byType[TypePermissionAPIGateway]
+	if !rulePermission.AppliesToTrigger(manifest.TriggerSchedule) {
+		t.Error("TypePermissionEventsRule must apply to a schedule-triggered service")
+	}
+	if rulePermission.AppliesToTrigger(manifest.TriggerHTTP) {
+		t.Error("TypePermissionEventsRule must not apply to an HTTP-triggered service")
+	}
+	if !apiPermission.AppliesToTrigger(manifest.TriggerHTTP) {
+		t.Error("TypePermissionAPIGateway must apply to an HTTP-triggered service")
+	}
+	if apiPermission.AppliesToTrigger(manifest.TriggerSchedule) {
+		t.Error("TypePermissionAPIGateway must not apply to a schedule-triggered service")
+	}
+}
+
+// TestHTTPFrontDoorRegistrationsAreMutuallyExclusive is PR #80's review
+// fix at this package's own boundary: AWS::Lambda::Url and
+// AWS::ApiGatewayV2::Api both apply to TriggerHTTP, so Triggers alone
+// cannot stop a service planning both. SelectedBy must select exactly one,
+// and its own accompanying permission (TypePermissionAPIGateway) must
+// track ApiGatewayV2::Api's choice exactly — creating that permission for
+// a service that has no API Gateway would name a SourceArn Cloud Control
+// could never resolve.
+func TestHTTPFrontDoorRegistrationsAreMutuallyExclusive(t *testing.T) {
+	regs := Registrations(&Client{})
+	byType := map[string]resource.Registration{}
+	for _, r := range regs {
+		byType[r.Type] = r
+	}
+	url, httpAPI, apiPermission := byType[TypeLambdaURL], byType[TypeAPIGatewayV2API], byType[TypePermissionAPIGateway]
+
+	cases := []struct {
+		name         string
+		settings     map[string]any
+		wantURL      bool
+		wantAPI      bool
+		wantAPIPerms bool
+	}{
+		{"unset settings default to apigateway", nil, false, true, true},
+		{"empty settings default to apigateway", map[string]any{}, false, true, true},
+		{"explicit apigateway", map[string]any{"httpFrontDoor": "apigateway"}, false, true, true},
+		{"explicit url", map[string]any{"httpFrontDoor": "url"}, true, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := url.AppliesToSettings(c.settings); got != c.wantURL {
+				t.Errorf("TypeLambdaURL.AppliesToSettings(%v) = %v, want %v", c.settings, got, c.wantURL)
+			}
+			if got := httpAPI.AppliesToSettings(c.settings); got != c.wantAPI {
+				t.Errorf("TypeAPIGatewayV2API.AppliesToSettings(%v) = %v, want %v", c.settings, got, c.wantAPI)
+			}
+			if got := apiPermission.AppliesToSettings(c.settings); got != c.wantAPIPerms {
+				t.Errorf("TypePermissionAPIGateway.AppliesToSettings(%v) = %v, want %v", c.settings, got, c.wantAPIPerms)
+			}
+			if url.AppliesToSettings(c.settings) && httpAPI.AppliesToSettings(c.settings) {
+				t.Fatalf("both TypeLambdaURL and TypeAPIGatewayV2API select for settings=%v — a service would get two HTTP front doors", c.settings)
+			}
+		})
 	}
 }
 
@@ -163,7 +223,8 @@ func TestRegisterExpandsCapabilitiesInPhaseOrder(t *testing.T) {
 	}
 	wantCompute := []string{
 		TypeArtifactBucket, TypeIAMRole, // PhaseStorage, registration order
-		TypeLambdaFunction, TypeSSMParameter, TypeLambdaURL, TypeEventsRule, TypeAPIGatewayV2API, // PhaseCompute, registration order
+		TypeLambdaFunction, TypeLambdaURL, TypeEventsRule, TypePermissionEventsRule,
+		TypeAPIGatewayV2API, TypePermissionAPIGateway, // PhaseCompute, registration order
 	}
 	if len(compute) != len(wantCompute) {
 		t.Fatalf("compute = %+v, want %d entries", compute, len(wantCompute))

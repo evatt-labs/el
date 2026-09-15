@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/evatt-labs/kraai/internal/kerrors"
 	"github.com/evatt-labs/kraai/internal/resource"
@@ -84,7 +83,7 @@ func (e *eventsRuleResource) translate(ctx context.Context, spec resource.Spec) 
 	if err != nil {
 		return resource.Spec{}, err
 	}
-	functionARN := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", e.client.Region(), account, spec.Name)
+	fnARN := functionARN(e.client.Region(), account, spec.Name)
 
 	translated := spec
 	translated.Config = map[string]any{
@@ -92,7 +91,7 @@ func (e *eventsRuleResource) translate(ctx context.Context, spec resource.Spec) 
 		"ScheduleExpression": schedule,
 		"State":              "ENABLED",
 		"Targets": []any{
-			map[string]any{"Id": eventsRuleTargetID, "Arn": functionARN},
+			map[string]any{"Id": eventsRuleTargetID, "Arn": fnARN},
 		},
 	}
 	return translated, nil

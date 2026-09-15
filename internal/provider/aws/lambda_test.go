@@ -183,7 +183,12 @@ func TestLambdaFunctionDiffersFromStateChecksOnlyFunctionName(t *testing.T) {
 
 	// A spec whose dir does not even exist must still work: DiffersFromState
 	// never packages anything (see the type's own doc comment).
-	spec := resource.Spec{Name: "myenv-api", Config: map[string]any{"dir": "/nonexistent/path"}}
+	spec := resource.Spec{Name: "myenv-api", Config: map[string]any{
+		"dir": "/nonexistent/path",
+		"settings": map[string]any{
+			"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:aws:lambda:us-east-1:123456789012:layer:adapter:1",
+		},
+	}}
 	state := &resource.State{Attributes: map[string]any{"FunctionName": "myenv-api-old"}}
 
 	differs, err := fn.DiffersFromState(spec, state)

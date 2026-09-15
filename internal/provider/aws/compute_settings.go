@@ -59,12 +59,49 @@ type LambdaSettings struct {
 	// unconditionally (CloudWatch Logs access; a function that cannot
 	// write its own logs is not usefully deployable).
 	ManagedPolicyArns []string
+	// HTTPFrontDoor selects which of this package's two HTTP invoke paths
+	// an HTTP-triggered service gets: httpFrontDoorAPIGateway (the
+	// default) or httpFrontDoorURL. Always normalized to one of those two
+	// values by decodeLambdaSettings — never empty, and never anything
+	// else, because register.go's registrations for both paths are gated
+	// on this exact value via resource.Registration.SelectedBy and a
+	// service must get exactly one. See httpFrontDoorIs's own doc comment
+	// for why the planner-facing selector reads the raw setting directly
+	// rather than going through this validated decode.
+	HTTPFrontDoor string
 }
 
 const (
 	defaultMemorySize = 512
 	defaultTimeout    = 30
+
+	// httpFrontDoorAPIGateway and httpFrontDoorURL are LambdaSettings.
+	// HTTPFrontDoor's only two valid values, and the two front doors
+	// register.go's ApiGatewayV2::Api and Lambda::Url registrations
+	// select between via SelectedBy.
+	//
+	// API Gateway is the default: kraai-api's own documented topology
+	// (docs/BLUEPRINT.md) is "FastAPI app behind API Gateway HTTP API,
+	// deployed via AWS Lambda Web Adapter" — an unconfigured service
+	// should get the shape kraai's own first real consumer actually uses,
+	// not the newer/simpler alternative this package happens to register
+	// second.
+	httpFrontDoorAPIGateway = "apigateway"
+	httpFrontDoorURL        = "url"
 )
+
+// normalizeHTTPFrontDoor maps an unset value to the documented default,
+// leaving anything else (valid or not) unchanged for the caller to
+// validate. Shared by decodeLambdaSettings (which validates and errors on
+// anything else) and httpFrontDoorIs (register.go's SelectedBy closures,
+// which only need to compare — see that function's own doc comment for why
+// it does not itself validate).
+func normalizeHTTPFrontDoor(raw string) string {
+	if raw == "" {
+		return httpFrontDoorAPIGateway
+	}
+	return raw
+}
 
 // decodeLambdaSettings reads LambdaSettings out of a compute Spec's merged
 // settings map (Spec.Config["settings"]).
@@ -104,7 +141,44 @@ func decodeLambdaSettings(settings map[string]any) (LambdaSettings, error) {
 		return LambdaSettings{}, kerrors.Validation(
 			"aws lambda compute is missing required settings: %v", missing)
 	}
+
+	// httpFrontDoor is validated here, not just left to select nothing:
+	// register.go's ApiGatewayV2::Api and Lambda::Url registrations are
+	// both gated by SelectedBy on this value, and SelectedBy has no error
+	// channel of its own — an unrecognized value would make both
+	// registrations return false and the service would silently plan no
+	// HTTP front door at all, rather than the loud failure an invalid
+	// manifest value deserves (Rule 20). Checked in decodeLambdaSettings,
+	// not inside httpFrontDoorIs itself, so it is caught once, centrally,
+	// rather than by every caller of that selector remembering to.
+	s.HTTPFrontDoor = normalizeHTTPFrontDoor(settingStr(settings, "httpFrontDoor"))
+	if s.HTTPFrontDoor != httpFrontDoorAPIGateway && s.HTTPFrontDoor != httpFrontDoorURL {
+		return LambdaSettings{}, kerrors.Validation(
+			"aws lambda compute settings: httpFrontDoor must be %q or %q (or unset, defaulting to %q), got %q",
+			httpFrontDoorAPIGateway, httpFrontDoorURL, httpFrontDoorAPIGateway, s.HTTPFrontDoor)
+	}
 	return s, nil
+}
+
+// httpFrontDoorIs builds a resource.Registration.SelectedBy closure that
+// matches when a service's merged compute settings select want.
+//
+// Reads the raw setting directly via settingStr/normalizeHTTPFrontDoor
+// rather than calling the validating decodeLambdaSettings: SelectedBy runs
+// during internal/plan's expandCompute for every compute registration,
+// including AWS::IAM::Role and AWS::SSM::Parameter, which carry no opinion
+// on httpFrontDoor at all and whose own registrations pass nil settings
+// maps in some call paths — decodeLambdaSettings would refuse those on
+// missing runtime/architecture/layerArn, coupling front-door selection to
+// requirements that have nothing to do with it. An actually-invalid value
+// still cannot select nothing silently: decodeLambdaSettings validates it
+// too, reached unconditionally through AWS::Lambda::Function's own
+// DiffersFromState and Create/Update (see lambda.go), so `kraai plan`
+// surfaces the same error this selector would otherwise swallow.
+func httpFrontDoorIs(want string) func(settings map[string]any) bool {
+	return func(settings map[string]any) bool {
+		return normalizeHTTPFrontDoor(settingStr(settings, "httpFrontDoor")) == want
+	}
 }
 
 func settingStr(settings map[string]any, key string) string {

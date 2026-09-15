@@ -191,6 +191,106 @@ func TestPlan_ComputeNameIsPerServiceNotPerBinding(t *testing.T) {
 	}
 }
 
+// frontDoorRegistryFixture registers three compute types shaped like
+// internal/provider/aws's real Tier 2 set after the front-door mutual-
+// exclusivity fix: a function type with no gating at all, and two
+// HTTP-gated types — "http_api" and "function_url" — that share the
+// identical Triggers value and are told apart only by SelectedBy, exactly
+// the shape Triggers alone cannot express (see expandCompute's own doc
+// comment on SelectedBy).
+type frontDoorRegistryFixture struct {
+	reg *resource.Registry
+}
+
+func newFrontDoorRegistryFixture(t *testing.T) *frontDoorRegistryFixture {
+	t.Helper()
+	f := &frontDoorRegistryFixture{reg: resource.NewRegistry()}
+
+	frontDoorIs := func(want string) func(map[string]any) bool {
+		return func(settings map[string]any) bool {
+			got, _ := settings["frontDoor"].(string)
+			if got == "" {
+				got = "apigateway" // the documented default
+			}
+			return got == want
+		}
+	}
+
+	regs := []resource.Registration{
+		{
+			Provider: "fakecloud", Type: "function", Capability: manifest.CapabilityCompute,
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+		},
+		{
+			Provider: "fakecloud", Type: "http_api", Capability: manifest.CapabilityCompute,
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+			Triggers: []string{manifest.TriggerHTTP}, SelectedBy: frontDoorIs("apigateway"),
+		},
+		{
+			Provider: "fakecloud", Type: "function_url", Capability: manifest.CapabilityCompute,
+			Phase: resource.PhaseCompute, Lookup: resource.LookupByName, Resource: newFakeResource(),
+			Triggers: []string{manifest.TriggerHTTP}, SelectedBy: frontDoorIs("url"),
+		},
+	}
+	for _, r := range regs {
+		if err := f.reg.Register(r); err != nil {
+			t.Fatalf("Register(%s): %v", r.Key(), err)
+		}
+	}
+	return f
+}
+
+func (f *frontDoorRegistryFixture) providers(settings map[string]any) manifest.Providers {
+	return manifest.Providers{
+		Compute: &manifest.Provider{Vendor: "fakecloud", Settings: settings},
+	}
+}
+
+// TestPlan_HTTPFrontDoorIsMutuallyExclusive is the fix for the bug PR #80's
+// review caught: two registrations both gated to TriggerHTTP planned
+// together for every HTTP service, giving it two live invoke paths where
+// the manifest asked for one shape. A service must get exactly one HTTP
+// front door, selected by its compute settings.
+func TestPlan_HTTPFrontDoorIsMutuallyExclusive(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings map[string]any
+		want     string
+	}{
+		{"unset settings default to apigateway", nil, "http_api"},
+		{"explicit apigateway", map[string]any{"frontDoor": "apigateway"}, "http_api"},
+		{"explicit url", map[string]any{"frontDoor": "url"}, "function_url"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFrontDoorRegistryFixture(t)
+			m := &manifest.Manifest{
+				Root: manifest.Root{Providers: f.providers(nil)},
+				Services: map[string]manifest.Service{
+					"api": {
+						Dir:     ".",
+						Compute: &manifest.Compute{Trigger: manifest.TriggerHTTP, Settings: c.settings},
+					},
+				},
+			}
+
+			p, err := New(f.reg).Plan(context.Background(), m, envName)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+
+			types := actionTypesFor(p, "api")
+			if len(types) != 2 || !types["function"] || !types[c.want] {
+				t.Fatalf("api's planned types = %v, want exactly {function, %s}", types, c.want)
+			}
+			other := map[string]string{"http_api": "function_url", "function_url": "http_api"}[c.want]
+			if types[other] {
+				t.Fatalf("api's planned types = %v, want %q absent: exactly one HTTP front door", types, other)
+			}
+		})
+	}
+}
+
 // actionTypesFor returns the set of resource.Registration.Type values
 // planned for one service key.
 func actionTypesFor(p *Plan, svcKey string) map[string]bool {
