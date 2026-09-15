@@ -137,6 +137,15 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 			"Variables": env,
 		},
 	}
+	// ReservedConcurrentExecutions is set only when the manifest actually
+	// declared one — nil means "no opinion," not zero, and the two must
+	// never collapse into the same desired-state shape. See
+	// LambdaSettings.ReservedConcurrentExecutions' own doc comment
+	// (compute_settings.go) for why, and for the live schema evidence that
+	// this is the correct Cloud Control property name.
+	if lambdaSettings.ReservedConcurrentExecutions != nil {
+		translated.Config["ReservedConcurrentExecutions"] = *lambdaSettings.ReservedConcurrentExecutions
+	}
 	return translated, nil
 }
 

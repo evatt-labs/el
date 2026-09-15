@@ -2,6 +2,7 @@ package aws
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -154,5 +155,138 @@ func TestDecodeLambdaSettingsManagedPolicyArns(t *testing.T) {
 	want := []string{"arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"}
 	if !reflect.DeepEqual(got.ManagedPolicyArns, want) {
 		t.Fatalf("ManagedPolicyArns = %+v, want %+v (non-string/empty entries dropped)", got.ManagedPolicyArns, want)
+	}
+}
+
+func intPtr(i int) *int { return &i }
+
+func baseSettingsForConcurrency() map[string]any {
+	return map[string]any{
+		"runtime": "python3.13", "architecture": "arm64", "layerArn": "arn:x",
+	}
+}
+
+func TestDecodeLambdaSettingsReservedConcurrency(t *testing.T) {
+	t.Run("absent means nil, not zero", func(t *testing.T) {
+		got, err := decodeLambdaSettings(baseSettingsForConcurrency())
+		if err != nil {
+			t.Fatalf("decodeLambdaSettings: %v", err)
+		}
+		if got.ReservedConcurrentExecutions != nil {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want nil", *got.ReservedConcurrentExecutions)
+		}
+	})
+
+	t.Run("explicit zero is honored, not treated as absent", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["reservedConcurrency"] = 0
+		got, err := decodeLambdaSettings(settings)
+		if err != nil {
+			t.Fatalf("decodeLambdaSettings: %v", err)
+		}
+		if !reflect.DeepEqual(got.ReservedConcurrentExecutions, intPtr(0)) {
+			t.Fatalf("ReservedConcurrentExecutions = %+v, want *0", got.ReservedConcurrentExecutions)
+		}
+	})
+
+	t.Run("a positive value round trips, including the JSON float64 shape", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["reservedConcurrency"] = float64(5) // encoding/json round trip shape, e.g. --set
+		got, err := decodeLambdaSettings(settings)
+		if err != nil {
+			t.Fatalf("decodeLambdaSettings: %v", err)
+		}
+		if !reflect.DeepEqual(got.ReservedConcurrentExecutions, intPtr(5)) {
+			t.Fatalf("ReservedConcurrentExecutions = %+v, want *5", got.ReservedConcurrentExecutions)
+		}
+	})
+
+	t.Run("a wrong-typed value is a real error, not silently dropped or defaulted", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["reservedConcurrency"] = "five"
+		if _, err := decodeLambdaSettings(settings); err == nil {
+			t.Fatal("expected a validation error for a non-integer reservedConcurrency")
+		}
+	})
+
+	t.Run("a negative value is a real error", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["reservedConcurrency"] = -1
+		if _, err := decodeLambdaSettings(settings); err == nil {
+			t.Fatal("expected a validation error for a negative reservedConcurrency")
+		}
+	})
+}
+
+func TestDecodeLambdaSettingsPackage(t *testing.T) {
+	t.Run("unset is fine", func(t *testing.T) {
+		if _, err := decodeLambdaSettings(baseSettingsForConcurrency()); err != nil {
+			t.Fatalf("decodeLambdaSettings: %v", err)
+		}
+	})
+
+	t.Run("zip is the only accepted value", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["package"] = "zip"
+		if _, err := decodeLambdaSettings(settings); err != nil {
+			t.Fatalf("decodeLambdaSettings: %v", err)
+		}
+	})
+
+	t.Run("image is rejected, not silently built as zip anyway", func(t *testing.T) {
+		settings := baseSettingsForConcurrency()
+		settings["package"] = "image"
+		if _, err := decodeLambdaSettings(settings); err == nil {
+			t.Fatal("expected a validation error for package: image")
+		}
+	})
+}
+
+// TestDecodeLambdaSettingsUnknownKey is the revert-and-fail case for the
+// unknown-key design itself: quoted in the PR body per the brief, this was
+// run once against the pre-fix decodeLambdaSettings (no
+// validateKnownSettings call) to confirm it actually fails without the fix,
+// then against the fixed version to confirm it passes.
+func TestDecodeLambdaSettingsUnknownKey(t *testing.T) {
+	settings := baseSettingsForConcurrency()
+	settings["reservdConcurrency"] = 5 // a real, plausible typo of reservedConcurrency
+	_, err := decodeLambdaSettings(settings)
+	if err == nil {
+		t.Fatal("expected a validation error for an unrecognized key, got nil")
+	}
+	if !strings.Contains(err.Error(), "reservdConcurrency") {
+		t.Fatalf("error %q does not name the offending key", err.Error())
+	}
+	if !strings.Contains(err.Error(), "reservedConcurrency") {
+		t.Fatalf("error %q does not suggest the close match", err.Error())
+	}
+}
+
+// TestDecodeLambdaSettingsRegionDoesNotTripTheUnknownKeyCheck is the other
+// half of the same design: DecodeSettings' own "region" key reaches
+// decodeLambdaSettings too, via manifest.MergeSettings layering a service's
+// settings over providers.compute.settings before internal/plan ever calls
+// this decoder (see decodeLambdaSettings' own doc comment) — it must not be
+// rejected as unrecognized just because decodeLambdaSettings itself never
+// reads it.
+func TestDecodeLambdaSettingsRegionDoesNotTripTheUnknownKeyCheck(t *testing.T) {
+	settings := baseSettingsForConcurrency()
+	settings["region"] = "us-east-1"
+	if _, err := decodeLambdaSettings(settings); err != nil {
+		t.Fatalf("decodeLambdaSettings: %v (region should be a known key, not just a lambda one)", err)
+	}
+}
+
+func TestValidateKnownSettingsListsEveryOffendingKey(t *testing.T) {
+	err := validateKnownSettings(map[string]any{
+		"runtime": "python3.13", "bogusOne": 1, "bogusTwo": 2,
+	})
+	if err == nil {
+		t.Fatal("expected a validation error")
+	}
+	for _, want := range []string{"bogusOne", "bogusTwo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err.Error(), want)
+		}
 	}
 }

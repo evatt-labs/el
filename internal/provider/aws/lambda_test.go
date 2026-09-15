@@ -107,6 +107,76 @@ func TestLambdaFunctionCreatePackagesUploadsAndWiresProperties(t *testing.T) {
 	}
 }
 
+// TestLambdaFunctionReservedConcurrentExecutions covers the property
+// reaching the function's desired state under the real Cloud Control name
+// (ReservedConcurrentExecutions, verified against the live
+// AWS::Lambda::Function schema — see LambdaSettings.
+// ReservedConcurrentExecutions' own doc comment in compute_settings.go),
+// and that absent vs. explicit-zero produce different desired states
+// rather than being conflated.
+func TestLambdaFunctionReservedConcurrentExecutions(t *testing.T) {
+	newFn := func(t *testing.T) (*lambdaFunctionResource, *fakeClient) {
+		t.Helper()
+		fc := &fakeClient{
+			createID: "myenv-api", createProps: map[string]any{},
+			schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+		}
+		return newLambdaFunctionResourceForTest(fc, &fakeS3{}, &fakeSTS{account: "123456789012"}), fc
+	}
+
+	t.Run("absent setting emits no property at all", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, nil)
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		if _, present := desired["ReservedConcurrentExecutions"]; present {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want the property omitted entirely", desired["ReservedConcurrentExecutions"])
+		}
+	})
+
+	t.Run("explicit zero emits 0, not an omitted property", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, map[string]any{"reservedConcurrency": 0})
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		got, present := desired["ReservedConcurrentExecutions"]
+		if !present {
+			t.Fatal("ReservedConcurrentExecutions absent, want present as 0")
+		}
+		if got != 0 {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want 0", got)
+		}
+	})
+
+	t.Run("a positive value reaches the desired state unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		fn, fc := newFn(t)
+		spec := baseLambdaSpec(t, dir, map[string]any{"reservedConcurrency": 5})
+		if _, err := fn.Create(context.Background(), spec); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		desired := fc.createCalls[0]
+		if desired["ReservedConcurrentExecutions"] != 5 {
+			t.Fatalf("ReservedConcurrentExecutions = %v, want 5", desired["ReservedConcurrentExecutions"])
+		}
+	})
+}
+
 func TestLambdaFunctionEnvLiteralsAndSecrets(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
