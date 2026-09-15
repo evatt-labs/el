@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evatt-labs/kraai/internal/httpx"
 	"github.com/evatt-labs/kraai/internal/kerrors"
 )
 
@@ -135,7 +136,12 @@ func WithRetryTimings(initialDelay, maxDelay, timeout time.Duration) Option {
 // New builds a client authenticating with apiKey.
 func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
-		httpClient:        &http.Client{Timeout: 60 * time.Second},
+		// httpx.NewClient (D13): shares the process-wide pooled Transport
+		// rather than constructing its own, so a phase's concurrent calls
+		// into this client reuse warm connections instead of each paying a
+		// fresh handshake. WithHTTPClient overrides this for tests and for
+		// a caller that has its own reason to inject a different client.
+		httpClient:        httpx.NewClient(60*time.Second, nil, nil),
 		baseURL:           DefaultBaseURL,
 		apiKey:            apiKey,
 		retryInitialDelay: defaultRetryInitialDelay,
