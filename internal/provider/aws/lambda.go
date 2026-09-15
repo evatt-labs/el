@@ -132,11 +132,17 @@ func (l *lambdaFunctionResource) translate(ctx context.Context, spec resource.Sp
 		"MemorySize":    lambdaSettings.MemorySize,
 		"Timeout":       lambdaSettings.Timeout,
 		"Role":          execRoleARN,
-		"Layers":        []any{lambdaSettings.LayerArn},
 		"Environment": map[string]any{
 			"Variables": env,
 		},
 	}
+	// Layers is emitted only when one was configured. A directly-invoked
+	// function needs no layer, and sending Layers: [""] for it would be an
+	// invalid ARN that Cloud Control rejects outright.
+	if lambdaSettings.LayerArn != "" {
+		translated.Config["Layers"] = []any{lambdaSettings.LayerArn}
+	}
+
 	// ReservedConcurrentExecutions is set only when the manifest actually
 	// declared one — nil means "no opinion," not zero, and the two must
 	// never collapse into the same desired-state shape. See

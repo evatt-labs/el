@@ -177,9 +177,18 @@ func normalizeHTTPFrontDoor(raw string) string {
 // already exists — the exact gap that let a typo'd reservedConcurrency and
 // an invalid httpFrontDoor both plan clean against a fresh environment).
 //
-// Runtime, Architecture and LayerArn are required: without them there is no
-// deployable function (no interpreter, no instruction set, no adapter to
-// run an ASGI app under). Everything else defaults.
+// Runtime and Architecture are required: without them there is no deployable
+// function at all, since nothing says which interpreter or instruction set
+// to build for.
+//
+// LayerArn is NOT required, deliberately. An earlier version demanded it on
+// the reasoning that there would be "no adapter to run an ASGI app under" —
+// which silently assumed every function is a web application behind the
+// Lambda Web Adapter. A directly-invoked function is not: it exposes an
+// ordinary handler, is called by a scheduler or another service rather than
+// over HTTP, and attaching a web adapter layer to it would be meaningless.
+// Requiring one made such a function unplannable, which the real consumer
+// manifest hit immediately on its schedule-triggered service.
 func decodeLambdaSettings(settings map[string]any) (LambdaSettings, error) {
 	if err := validateKnownSettings(settings); err != nil {
 		return LambdaSettings{}, err
@@ -224,9 +233,6 @@ func decodeLambdaSettings(settings map[string]any) (LambdaSettings, error) {
 	}
 	if s.Architecture == "" {
 		missing = append(missing, "architecture")
-	}
-	if s.LayerArn == "" {
-		missing = append(missing, "layerArn")
 	}
 	if len(missing) > 0 {
 		return LambdaSettings{}, kerrors.Validation(

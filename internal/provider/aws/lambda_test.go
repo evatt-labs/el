@@ -363,3 +363,41 @@ func TestArtifactObjectKey(t *testing.T) {
 		t.Fatalf("artifactObjectKey = %q, want %q", got, want)
 	}
 }
+
+// TestLambdaFunctionCreateOmitsLayersWhenUnset covers the directly-invoked
+// function: no Web Adapter layer, because nothing runs an ASGI app under it.
+//
+// Layers was previously emitted unconditionally, so a function with no
+// layerArn would have submitted Layers: [""] — an invalid ARN Cloud Control
+// rejects outright. That was unreachable only because decodeLambdaSettings
+// used to require layerArn, which in turn made a schedule-triggered service
+// unplannable at all; fixing that requirement exposed this.
+func TestLambdaFunctionCreateOmitsLayersWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("app\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fc := &fakeClient{
+		createID: "myenv-tick", createProps: map[string]any{},
+		schema: Schema{PrimaryIdentifier: []string{"/properties/FunctionName"}},
+	}
+	fn := newLambdaFunctionResourceForTest(fc, &fakeS3{}, &fakeSTS{account: "123456789012"})
+
+	spec := baseLambdaSpec(t, dir, nil)
+	// A directly-invoked function: an ordinary handler, no adapter layer.
+	settings, _ := spec.Config["settings"].(map[string]any)
+	delete(settings, "layerArn")
+	spec.Config["handler"] = "app.tasks.tick.handler"
+	spec.Config["trigger"] = "schedule"
+
+	if _, err := fn.Create(context.Background(), spec); err != nil {
+		t.Fatalf("Create without layerArn: %v", err)
+	}
+	if len(fc.createCalls) != 1 {
+		t.Fatalf("got %d CreateResource calls, want 1", len(fc.createCalls))
+	}
+	if got, ok := fc.createCalls[0]["Layers"]; ok {
+		t.Errorf("Layers present in desired state (%v), want omitted entirely", got)
+	}
+}

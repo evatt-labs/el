@@ -61,13 +61,37 @@ func TestDecodeLambdaSettingsMissingRequired(t *testing.T) {
 	cases := []map[string]any{
 		{"architecture": "arm64", "layerArn": "arn:x"},
 		{"runtime": "python3.13", "layerArn": "arn:x"},
-		{"runtime": "python3.13", "architecture": "arm64"},
 		{},
 	}
 	for _, settings := range cases {
 		if _, err := decodeLambdaSettings(settings); err == nil {
 			t.Errorf("decodeLambdaSettings(%+v): expected a validation error", settings)
 		}
+	}
+}
+
+// TestDecodeLambdaSettingsLayerArnIsOptional pins the contract an earlier
+// version of this package got wrong: layerArn is not required.
+//
+// It was required on the reasoning that without it there is "no adapter to
+// run an ASGI app under" — which assumes every function is a web
+// application behind the Lambda Web Adapter. A directly-invoked function,
+// called by a scheduler rather than over HTTP, exposes an ordinary handler
+// and needs no layer at all. The real consumer manifest hit this
+// immediately: its schedule-triggered service could not be planned.
+//
+// The previous case list for TestDecodeLambdaSettingsMissingRequired
+// asserted this exact input WAS an error, so that test was actively
+// defending the bug rather than merely failing to catch it.
+func TestDecodeLambdaSettingsLayerArnIsOptional(t *testing.T) {
+	settings, err := decodeLambdaSettings(map[string]any{
+		"runtime": "python3.13", "architecture": "arm64",
+	})
+	if err != nil {
+		t.Fatalf("decodeLambdaSettings without layerArn: unexpected error: %v", err)
+	}
+	if settings.LayerArn != "" {
+		t.Errorf("LayerArn = %q, want empty", settings.LayerArn)
 	}
 }
 
